@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemma Trading Bot - Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            background: radial-gradient(circle at top, #111827 0%, #030712 100%);
+            font-family: 'Outfit', sans-serif;
+        }
+    </style>
+</head>
+<body class="min-h-screen text-slate-100 p-6 md:p-12">
+    <div class="max-w-6xl mx-auto space-y-8">
+        
+        <!-- Header -->
+        <div class="flex flex-col md:flex-row justify-between items-start md:items-center border-b border-slate-800 pb-6 gap-4">
+            <div>
+                <h1 class="text-3xl font-bold tracking-tight bg-gradient-to-r from-violet-400 via-fuchsia-500 to-pink-500 bg-clip-text text-transparent">
+                    Gemma Trading Bot
+                </h1>
+                <p class="text-slate-400 text-sm mt-1">Reporte de Backtesting - BTCUSDT Futuros Apalancado</p>
+            </div>
+            <div class="bg-slate-900/80 backdrop-blur-md border border-slate-800 rounded-xl px-4 py-2 text-xs text-slate-400 flex items-center gap-2 shadow-lg">
+                <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                Simulación Completada
+            </div>
+        </div>
+
+        <!-- Metrics Grid -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div class="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-2xl p-6 shadow-xl flex flex-col justify-between hover:border-slate-700/80 transition duration-300">
+                <span class="text-slate-400 text-sm font-medium">Balance Inicial</span>
+                <span class="text-2xl font-bold text-slate-200 mt-2">$10000.00</span>
+                <span class="text-xs text-slate-500 mt-1">USDT</span>
+            </div>
+
+            <div class="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-2xl p-6 shadow-xl flex flex-col justify-between hover:border-slate-700/80 transition duration-300">
+                <span class="text-slate-400 text-sm font-medium">Balance Final</span>
+                <span class="text-2xl font-bold text-slate-100 mt-2">$9974.65</span>
+                <span class="text-xs text-slate-500 mt-1">USDT</span>
+            </div>
+
+            <div class="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-2xl p-6 shadow-xl flex flex-col justify-between hover:border-slate-700/80 transition duration-300">
+                <span class="text-slate-400 text-sm font-medium">Retorno de Inversión (ROI)</span>
+                <span class="text-2xl font-bold mt-2 text-rose-500">-0.25%</span>
+                <span class="text-xs text-slate-500 mt-1">Desde el inicio</span>
+            </div>
+
+            <div class="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-2xl p-6 shadow-xl flex flex-col justify-between hover:border-slate-700/80 transition duration-300">
+                <span class="text-slate-400 text-sm font-medium">Máximo Drawdown</span>
+                <span class="text-2xl font-bold text-rose-500 mt-2">-0.53%</span>
+                <span class="text-xs text-slate-500 mt-1">Pérdida máxima pico a valle</span>
+            </div>
+        </div>
+
+        <!-- Secondary Metrics Row -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div class="bg-slate-900/40 backdrop-blur-md border border-slate-800/60 rounded-xl p-5 flex items-center justify-between">
+                <span class="text-slate-400 text-sm">Operaciones Totales</span>
+                <span class="text-xl font-semibold text-violet-400">3</span>
+            </div>
+            <div class="bg-slate-900/40 backdrop-blur-md border border-slate-800/60 rounded-xl p-5 flex items-center justify-between">
+                <span class="text-slate-400 text-sm">Compras</span>
+                <span class="text-xl font-semibold text-emerald-400">1</span>
+            </div>
+            <div class="bg-slate-900/40 backdrop-blur-md border border-slate-800/60 rounded-xl p-5 flex items-center justify-between">
+                <span class="text-slate-400 text-sm">Ventas</span>
+                <span class="text-xl font-semibold text-amber-400">2</span>
+            </div>
+            <div class="bg-slate-900/40 backdrop-blur-md border border-slate-800/60 rounded-xl p-5 flex items-center justify-between">
+                <span class="text-slate-400 text-sm">Liquidaciones</span>
+                <span class="text-xl font-semibold text-slate-400">0</span>
+            </div>
+        </div>
+
+        <!-- Chart -->
+        <div class="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-3xl p-6 md:p-8 shadow-2xl">
+            <h2 class="text-lg font-semibold text-slate-200 mb-6 flex items-center gap-2">
+                <svg class="w-5 h-5 text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
+                Curva de Equidad (Equity Curve)
+            </h2>
+            <div class="relative w-full h-[400px]">
+                <canvas id="equityChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const labels = ["2020-04-20 00:00:00","2020-04-20 01:00:00","2020-04-20 02:00:00","2020-04-20 03:00:00","2020-04-20 04:00:00","2020-04-20 05:00:00","2020-04-20 06:00:00","2020-04-20 07:00:00","2020-04-20 08:00:00","2020-04-20 09:00:00"];
+        const dataPoints = [10000.0,9987.277787397572,10012.162024029627,9994.81846516486,10012.329594646677,10011.938596540225,10004.509632517638,10028.206910612247,9979.63936010367,9974.647040423619];
+
+        const ctx = document.getElementById('equityChart').getContext('2d');
+        const gradient = ctx.createLinearGradient(0, 0, 0, 400);
+        gradient.addColorStop(0, 'rgba(139, 92, 246, 0.4)');
+        gradient.addColorStop(1, 'rgba(139, 92, 246, 0.0)');
+
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Equity (USDT)',
+                    data: dataPoints,
+                    borderColor: '#a78bfa',
+                    borderWidth: 2,
+                    pointRadius: labels.length > 50 ? 0 : 3,
+                    pointHoverRadius: 6,
+                    fill: true,
+                    backgroundColor: gradient,
+                    tension: 0.2
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        backgroundColor: '#1e293b',
+                        titleColor: '#cbd5e1',
+                        bodyColor: '#f8fafc',
+                        borderColor: '#475569',
+                        borderWidth: 1
+                    }
+                },
+                scales: {
+                    x: {
+                        grid: { display: false },
+                        ticks: {
+                            color: '#94a3b8',
+                            font: { family: 'Outfit' },
+                            maxTicksLimit: 12
+                        }
+                    },
+                    y: {
+                        grid: { color: '#1e293b' },
+                        ticks: {
+                            color: '#94a3b8',
+                            font: { family: 'Outfit' },
+                            callback: function(value) {
+                                return '$' + value.toLocaleString();
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
