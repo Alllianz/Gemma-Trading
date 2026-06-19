@@ -1,1 +1,6 @@
 /target
+/venv
+/token.txt
+*.db
+*.csv
+/dashboard.html
