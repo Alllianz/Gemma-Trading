@@ -197,27 +197,14 @@ fn get_candles(db_path: &str, limit: Option<usize>) -> Result<Vec<Candle>, rusql
     Ok(candles)
 }
 
-fn get_api_token() -> String {
-    if let Ok(token) = std::env::var("LM_API_TOKEN") {
-        if !token.trim().is_empty() {
-            return token.trim().to_string();
-        }
-    }
-    if let Ok(token) = std::fs::read_to_string("token.txt") {
-        if !token.trim().is_empty() {
-            return token.trim().to_string();
-        }
-    }
-    "lm-studio".to_string()
-}
 
 async fn call_gemma(
     client: &reqwest::Client,
+    api_url: &str,
     api_token: &str,
     system_prompt: &str,
     user_prompt: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let url = "http://127.0.0.1:5508/v1/chat/completions";
     let body = serde_json::json!({
         "messages": [
             { "role": "system", "content": system_prompt },
@@ -226,14 +213,14 @@ async fn call_gemma(
         "temperature": 0.2
     });
 
-    let resp = client.post(url)
+    let resp = client.post(api_url)
         .bearer_auth(api_token)
         .json(&body)
         .send()
         .await?;
     if !resp.status().is_success() {
         let err_text = resp.text().await?;
-        return Err(format!("Error en respuesta de LM Studio ({}): {}", url, err_text).into());
+        return Err(format!("Error en respuesta de LM Studio ({}): {}", api_url, err_text).into());
     }
 
     let json_resp: serde_json::Value = resp.json().await?;
@@ -245,19 +232,19 @@ async fn call_gemma(
     Ok(content)
 }
 
-fn save_equity_curve(curve: &[(String, f64)], filename: &str) -> Result<(), std::io::Error> {
+fn save_equity_curve(curve: &[(String, f64, f64)], filename: &str) -> Result<(), std::io::Error> {
     use std::fs::File;
     use std::io::Write;
     let mut file = File::create(filename)?;
-    writeln!(file, "time,equity")?;
-    for (time_str, eq) in curve {
-        writeln!(file, "{},{}", time_str, eq)?;
+    writeln!(file, "time,equity,buy_and_hold")?;
+    for (time_str, eq, bh) in curve {
+        writeln!(file, "{},{},{}", time_str, eq, bh)?;
     }
     Ok(())
 }
 
 fn generate_dashboard(
-    curve: &[(String, f64)],
+    curve: &[(String, f64, f64)],
     num_compras: usize,
     num_ventas: usize,
     num_liquidaciones: usize,
@@ -267,19 +254,21 @@ fn generate_dashboard(
     use std::fs::File;
     use std::io::Write;
 
-    let initial_balance = curve.first().map(|(_, eq)| *eq).unwrap_or(0.0);
-    let final_balance = curve.last().map(|(_, eq)| *eq).unwrap_or(0.0);
+    let initial_balance = curve.first().map(|(_, eq, _)| *eq).unwrap_or(0.0);
+    let final_balance = curve.last().map(|(_, eq, _)| *eq).unwrap_or(0.0);
     let roi = if initial_balance > 0.0 {
         ((final_balance - initial_balance) / initial_balance) * 100.0
     } else {
         0.0
     };
 
-    let labels: Vec<String> = curve.iter().map(|(time, _)| time.clone()).collect();
-    let data: Vec<f64> = curve.iter().map(|(_, eq)| *eq).collect();
+    let labels: Vec<String> = curve.iter().map(|(time, _, _)| time.clone()).collect();
+    let data: Vec<f64> = curve.iter().map(|(_, eq, _)| *eq).collect();
+    let bh_data: Vec<f64> = curve.iter().map(|(_, _, bh)| *bh).collect();
 
     let labels_json = serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string());
     let data_json = serde_json::to_string(&data).unwrap_or_else(|_| "[]".to_string());
+    let bh_data_json = serde_json::to_string(&bh_data).unwrap_or_else(|_| "[]".to_string());
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -287,7 +276,7 @@ fn generate_dashboard(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemma Trading Bot - Dashboard</title>
+    <title>Gemma Trading Bot - Allianz - Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -305,7 +294,7 @@ fn generate_dashboard(
         <div class="flex flex-col md:flex-row justify-between items-start md:items-center border-b border-slate-800 pb-6 gap-4">
             <div>
                 <h1 class="text-3xl font-bold tracking-tight bg-gradient-to-r from-violet-400 via-fuchsia-500 to-pink-500 bg-clip-text text-transparent">
-                    Gemma Trading Bot
+                    Gemma Trading Bot - Allianz
                 </h1>
                 <p class="text-slate-400 text-sm mt-1">Reporte de Backtesting - BTCUSDT Futuros Apalancado</p>
             </div>
@@ -366,7 +355,7 @@ fn generate_dashboard(
         <div class="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-3xl p-6 md:p-8 shadow-2xl">
             <h2 class="text-lg font-semibold text-slate-200 mb-6 flex items-center gap-2">
                 <svg class="w-5 h-5 text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
-                Curva de Equidad (Equity Curve)
+                Comparativa de Equidad (Gemma vs Buy & Hold)
             </h2>
             <div class="relative w-full h-[400px]">
                 <canvas id="equityChart"></canvas>
@@ -377,6 +366,7 @@ fn generate_dashboard(
     <script>
         const labels = {labels_json};
         const dataPoints = {data_json};
+        const bhDataPoints = {bh_data_json};
 
         const ctx = document.getElementById('equityChart').getContext('2d');
         const gradient = ctx.createLinearGradient(0, 0, 0, 400);
@@ -387,23 +377,41 @@ fn generate_dashboard(
             type: 'line',
             data: {{
                 labels: labels,
-                datasets: [{{
-                    label: 'Equity (USDT)',
-                    data: dataPoints,
-                    borderColor: '#a78bfa',
-                    borderWidth: 2,
-                    pointRadius: labels.length > 50 ? 0 : 3,
-                    pointHoverRadius: 6,
-                    fill: true,
-                    backgroundColor: gradient,
-                    tension: 0.2
-                }}]
+                datasets: [
+                    {{
+                        label: 'Gemma Trading Bot (USDT)',
+                        data: dataPoints,
+                        borderColor: '#a78bfa',
+                        borderWidth: 2,
+                        pointRadius: labels.length > 50 ? 0 : 3,
+                        pointHoverRadius: 6,
+                        fill: true,
+                        backgroundColor: gradient,
+                        tension: 0.2
+                    }},
+                    {{
+                        label: 'Buy & Hold BTC (USDT)',
+                        data: bhDataPoints,
+                        borderColor: '#64748b',
+                        borderWidth: 1.5,
+                        borderDash: [5, 5],
+                        pointRadius: 0,
+                        fill: false,
+                        tension: 0.2
+                    }}
+                ]
             }},
             options: {{
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: {{
-                    legend: {{ display: false }},
+                    legend: {{
+                        display: true,
+                        labels: {{
+                            color: '#cbd5e1',
+                            font: {{ family: 'Outfit', size: 12 }}
+                        }}
+                    }},
                     tooltip: {{
                         mode: 'index',
                         intersect: false,
@@ -450,7 +458,8 @@ fn generate_dashboard(
         num_liquidaciones = num_liquidaciones,
         liq_color = if num_liquidaciones > 0 { "text-rose-500 animate-pulse" } else { "text-slate-400" },
         labels_json = labels_json,
-        data_json = data_json
+        data_json = data_json,
+        bh_data_json = bh_data_json
     );
 
     let mut file = File::create(filename)?;
@@ -486,7 +495,10 @@ async fn run_backtest(
     println!("📊 Iniciando backtest con {} velas...", candles.len());
 
     let client = reqwest::Client::new();
-    let mut api_token = get_api_token();
+    let (api_url, mut api_token) = get_llm_config(db_path).unwrap_or((
+        "http://127.0.0.1:5508/v1/chat/completions".to_string(),
+        "lm-studio".to_string()
+    ));
     let mut saldo_usdt = 10000.0;
     
     // Configuración de apalancamiento
@@ -505,6 +517,8 @@ async fn run_backtest(
     let mut max_drawdown = 0.0;
 
     let mut equity_curve = Vec::new();
+    let initial_price = candles.first().map(|c| c.close).unwrap_or(1.0);
+    let initial_balance = 10000.0;
 
     // El umbral de liquidación según la fórmula
     let liq_percent = get_liquidation_percentage(leverage);
@@ -584,7 +598,8 @@ async fn run_backtest(
             saldo_usdt
         };
 
-        equity_curve.push((date_str.clone(), equity));
+        let bh_equity = initial_balance * (candle.close / initial_price);
+        equity_curve.push((date_str.clone(), equity, bh_equity));
 
         if equity > peak_equity {
             peak_equity = equity;
@@ -646,7 +661,7 @@ async fn run_backtest(
         let mut gemma_analisis = "Error al obtener respuesta".to_string();
 
         while retries > 0 {
-            match call_gemma(&client, &api_token, &system_prompt, &user_prompt).await {
+            match call_gemma(&client, &api_url, &api_token, &system_prompt, &user_prompt).await {
                 Ok(content) => {
                     if let Some(parsed) = parse_gemma_response(&content) {
                         gemma_action = parsed.accion.to_uppercase();
@@ -670,8 +685,9 @@ async fn run_backtest(
                             let new_token = input.trim().to_string();
                             if !new_token.is_empty() {
                                 let _ = std::fs::write("token.txt", &new_token);
+                                let _ = save_llm_config(db_path, &api_url, &new_token);
                                 api_token = new_token;
-                                println!("✅ Token guardado en 'token.txt'. Reintentando petición...");
+                                println!("✅ Token guardado en la base de datos y 'token.txt'. Reintentando petición...");
                             }
                         }
                     }
@@ -1160,6 +1176,41 @@ fn init_api_db(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         )",
         [],
     )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS llm_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            api_url TEXT NOT NULL,
+            api_token TEXT NOT NULL
+        )",
+        [],
+    )?;
+    // Insert default values if not exists
+    conn.execute(
+        "INSERT OR IGNORE INTO llm_config (id, api_url, api_token) VALUES (1, 'http://127.0.0.1:5508/v1/chat/completions', 'lm-studio')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn get_llm_config(db_path: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare("SELECT api_url, api_token FROM llm_config WHERE id = 1")?;
+    let mut rows = stmt.query([])?;
+    if let Some(row) = rows.next()? {
+        let api_url: String = row.get(0)?;
+        let api_token: String = row.get(1)?;
+        Ok((api_url, api_token))
+    } else {
+        Ok(("http://127.0.0.1:5508/v1/chat/completions".to_string(), "lm-studio".to_string()))
+    }
+}
+
+fn save_llm_config(db_path: &str, api_url: &str, api_token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::open(db_path)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO llm_config (id, api_url, api_token) VALUES (1, ?1, ?2)",
+        rusqlite::params![api_url, api_token],
+    )?;
     Ok(())
 }
 
@@ -1360,13 +1411,16 @@ async fn run_live_gemma_step(
     );
     
     // Call Gemma API
-    let api_token = get_api_token();
+    let (api_url, api_token) = get_llm_config(db_path).unwrap_or((
+        "http://127.0.0.1:5508/v1/chat/completions".to_string(),
+        "lm-studio".to_string()
+    ));
     let mut gemma_action = "MANTENER".to_string();
     let mut gemma_analisis = "Error al obtener respuesta".to_string();
     let mut retries = 3;
     
     while retries > 0 {
-        match call_gemma(&client, &api_token, &system_prompt, &user_prompt).await {
+        match call_gemma(&client, &api_url, &api_token, &system_prompt, &user_prompt).await {
             Ok(content) => {
                 if let Some(parsed) = parse_gemma_response(&content) {
                     gemma_action = parsed.accion.to_uppercase();
@@ -1779,8 +1833,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("1. Update DB");
         println!("2. Backtest Completo");
         println!("3. Prueba de Backtest");
-        println!("4. Trading en Vivo");
-        println!("5. Salir");
+        println!("4. Configurar Modelo Local (Gemma)");
+        println!("5. Trading en Vivo");
+        println!("6. Salir");
         print!("Selecciona una opción: ");
         io::stdout().flush()?;
 
@@ -1816,11 +1871,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "4" => {
+                println!("\n[Configurar Modelo Local (Gemma)]");
+                let (curr_url, curr_token) = get_llm_config(db_path).unwrap_or((
+                    "http://127.0.0.1:5508/v1/chat/completions".to_string(),
+                    "lm-studio".to_string()
+                ));
+                print!("Ingrese URL de API local [actual: {}]: ", curr_url);
+                io::stdout().flush()?;
+                let mut url_input = String::new();
+                io::stdin().read_line(&mut url_input)?;
+                let url = if url_input.trim().is_empty() { curr_url } else { url_input.trim().to_string() };
+
+                print!("Ingrese API Token local [actual: {}]: ", curr_token);
+                io::stdout().flush()?;
+                let mut token_input = String::new();
+                io::stdin().read_line(&mut token_input)?;
+                let token = if token_input.trim().is_empty() { curr_token } else { token_input.trim().to_string() };
+
+                if let Err(e) = save_llm_config(db_path, &url, &token) {
+                    println!("❌ Error al guardar configuración de LLM: {}", e);
+                } else {
+                    println!("✅ Configuración de Gemma guardada con éxito en la base de datos.");
+                }
+            }
+            "5" => {
                 if let Err(e) = trading_en_vivo_menu(db_path, &client).await {
                     println!("❌ Error en el menú de trading en vivo: {}", e);
                 }
             }
-            "5" => {
+            "6" => {
                 println!("👋 ¡Hasta luego!");
                 break;
             }
