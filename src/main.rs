@@ -525,7 +525,25 @@ fn generate_dashboard(
                         ticks: {{
                             color: '#94a3b8',
                             font: {{ family: 'Outfit' }},
-                            maxTicksLimit: 12
+                            callback: function(value, index, ticks) {{
+                                const total = ticks.length;
+                                if (total <= 10) {{
+                                    return this.getLabelForValue(value);
+                                }}
+                                if (index === 0 || index === total - 1) {{
+                                    return this.getLabelForValue(value);
+                                }}
+                                const step = (total - 1) / 9;
+                                for (let i = 1; i <= 8; i++) {{
+                                    if (Math.abs(index - Math.round(i * step)) < 0.5) {{
+                                        return this.getLabelForValue(value);
+                                    }}
+                                }}
+                                return '';
+                            }},
+                            autoSkip: false,
+                            maxRotation: 0,
+                            minRotation: 0
                         }}
                     }},
                     y: {{
@@ -646,9 +664,10 @@ async fn run_backtest(
     let mut active_positions: Vec<Position> = Vec::new();
 
     for (i, candle) in candles.iter().enumerate() {
+        let date_format = if timeframe == "1d" { "%Y-%m-%d" } else { "%Y-%m-%d %H:%M:%S" };
         let date_str = chrono::Utc.timestamp_millis_opt(candle.open_time)
             .unwrap()
-            .format("%Y-%m-%d %H:%M:%S")
+            .format(date_format)
             .to_string();
 
         let precio_actual = candle.close;
