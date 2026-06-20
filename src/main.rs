@@ -799,10 +799,9 @@ async fn run_backtest(
                         if io::stdin().read_line(&mut input).is_ok() {
                             let new_token = input.trim().to_string();
                             if !new_token.is_empty() {
-                                let _ = std::fs::write("token.txt", &new_token);
                                 let _ = save_llm_config(db_path, &api_url, &new_token);
                                 api_token = new_token;
-                                println!("✅ Token guardado en la base de datos y 'token.txt'. Reintentando petición...");
+                                println!("✅ Token guardado en la base de datos. Reintentando petición...");
                             }
                         }
                     }
@@ -1888,11 +1887,16 @@ async fn trading_en_vivo_menu(db_path: &str, client: &reqwest::Client) -> Result
                                 println!("Selecciona la temporalidad para operar en vivo:");
                                 println!("1) 1H (1 Hora)");
                                 println!("2) 4H (4 Horas)");
+                                println!("3) 1D (1 Día)");
                                 print!("Selecciona: ");
                                 io::stdout().flush()?;
                                 let mut tf_input = String::new();
                                 io::stdin().read_line(&mut tf_input)?;
-                                let timeframe = if tf_input.trim() == "2" { "4h" } else { "1h" };
+                                let timeframe = match tf_input.trim() {
+                                    "2" => "4h",
+                                    "3" => "1d",
+                                    _ => "1h",
+                                };
 
                                 println!("🤖 Iniciando bucle de trading automatizado con Gemma ({}).", timeframe);
                                 println!("Presione ENTER para detener y volver al menú anterior en cualquier momento.");
@@ -1922,9 +1926,15 @@ async fn trading_en_vivo_menu(db_path: &str, client: &reqwest::Client) -> Result
                                         println!("⚠️ Error en el paso de trading: {}", e);
                                     }
                                     
-                                    // Wait until next hour/4-hour closes (or check stop_signal every 5 seconds)
+                                    // Wait until next hour/4-hour/1-day closes (or check stop_signal every 5 seconds)
                                     let now = chrono::Utc::now().timestamp();
-                                    let interval_secs = if timeframe == "4h" { 14400 } else { 3600 };
+                                    let interval_secs = if timeframe == "1d" {
+                                        86400
+                                    } else if timeframe == "4h" {
+                                        14400
+                                    } else {
+                                        3600
+                                    };
                                     let seconds_until_next_candle = interval_secs - (now % interval_secs);
                                     let sleep_secs = seconds_until_next_candle + 10; // 10 seconds buffer
                                     
@@ -1983,7 +1993,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\nSeleccione temporalidad a descargar:");
                 println!("1) 1H (1 Hora)");
                 println!("2) 4H (4 Horas)");
-                println!("3) Ambas");
+                println!("3) 1D (1 Día)");
+                println!("4) Todas (1H, 4H y 1D)");
                 print!("Selecciona una opción: ");
                 let _ = io::stdout().flush();
                 let mut tf_choice = String::new();
@@ -1991,9 +2002,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if io::stdin().read_line(&mut tf_choice).is_ok() {
                     match tf_choice.trim() {
                         "2" => timeframes.push("4h"),
-                        "3" => {
+                        "3" => timeframes.push("1d"),
+                        "4" => {
                             timeframes.push("1h");
                             timeframes.push("4h");
+                            timeframes.push("1d");
                         }
                         _ => timeframes.push("1h"),
                     }
@@ -2012,11 +2025,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\nSelecciona la temporalidad para el backtest:");
                 println!("1) 1H (1 Hora)");
                 println!("2) 4H (4 Horas)");
+                println!("3) 1D (1 Día)");
                 print!("Selecciona una opción: ");
                 let _ = io::stdout().flush();
                 let mut tf_choice = String::new();
-                let timeframe = if io::stdin().read_line(&mut tf_choice).is_ok() && tf_choice.trim() == "2" {
-                    "4h"
+                let timeframe = if io::stdin().read_line(&mut tf_choice).is_ok() {
+                    match tf_choice.trim() {
+                        "2" => "4h",
+                        "3" => "1d",
+                        _ => "1h",
+                    }
                 } else {
                     "1h"
                 };
@@ -2064,11 +2082,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\nSelecciona la temporalidad para la prueba de backtest:");
                 println!("1) 1H (1 Hora)");
                 println!("2) 4H (4 Horas)");
+                println!("3) 1D (1 Día)");
                 print!("Selecciona una opción: ");
                 let _ = io::stdout().flush();
                 let mut tf_choice = String::new();
-                let timeframe = if io::stdin().read_line(&mut tf_choice).is_ok() && tf_choice.trim() == "2" {
-                    "4h"
+                let timeframe = if io::stdin().read_line(&mut tf_choice).is_ok() {
+                    match tf_choice.trim() {
+                        "2" => "4h",
+                        "3" => "1d",
+                        _ => "1h",
+                    }
                 } else {
                     "1h"
                 };
