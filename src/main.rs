@@ -10,6 +10,41 @@ enum PositionType {
     Short,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Position {
+    position_type: PositionType,
+    margin: f64,
+    size_btc: f64,
+    entry_price: f64,
+    liquidation_price: f64,
+}
+
+fn calculate_correlation(series_a: &[f64], series_b: &[f64]) -> f64 {
+    let n = series_a.len();
+    if n == 0 || n != series_b.len() {
+        return 0.0;
+    }
+    let mean_a = series_a.iter().sum::<f64>() / n as f64;
+    let mean_b = series_b.iter().sum::<f64>() / n as f64;
+
+    let mut num = 0.0;
+    let mut den_a = 0.0;
+    let mut den_b = 0.0;
+
+    for i in 0..n {
+        let diff_a = series_a[i] - mean_a;
+        let diff_b = series_b[i] - mean_b;
+        num += diff_a * diff_b;
+        den_a += diff_a * diff_a;
+        den_b += diff_b * diff_b;
+    }
+
+    if den_a == 0.0 || den_b == 0.0 {
+        return 0.0;
+    }
+    num / (den_a * den_b).sqrt()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Candle {
     open_time: i64,
@@ -45,36 +80,78 @@ fn parse_gemma_response(text: &str) -> Option<GemmaResponse> {
     serde_json::from_str(cleaned).ok()
 }
 
-async fn download_candles(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn download_candles(db_path: &str, timeframe: &str) -> Result<(), Box<dyn std::error::Error>> {
     let conn = Connection::open(db_path)?;
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS candles (
-            open_time INTEGER PRIMARY KEY,
-            open REAL NOT NULL,
-            high REAL NOT NULL,
-            low REAL NOT NULL,
-            close REAL NOT NULL,
-            volume REAL NOT NULL,
-            close_time INTEGER NOT NULL
-        )",
+    
+    // Check if candles table exists and has timeframe column
+    let has_timeframe: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('candles') WHERE name='timeframe')",
         [],
-    )?;
+        |row| row.get(0),
+    ).unwrap_or(false);
 
-    // Get the last open_time from the database
-    let mut stmt = conn.prepare("SELECT MAX(open_time) FROM candles")?;
-    let last_time: Option<i64> = stmt.query_row([], |row| {
+    let table_exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='candles')",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(false);
+
+    if table_exists && !has_timeframe {
+        println!("🔄 Migrando tabla de velas existente al nuevo formato con soporte de temporalidad...");
+        let _ = conn.execute("ALTER TABLE candles RENAME TO candles_old", []);
+        conn.execute(
+            "CREATE TABLE candles (
+                timeframe TEXT NOT NULL,
+                open_time INTEGER NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume REAL NOT NULL,
+                close_time INTEGER NOT NULL,
+                PRIMARY KEY (timeframe, open_time)
+            )",
+            [],
+        )?;
+        let _ = conn.execute(
+            "INSERT INTO candles (timeframe, open_time, open, high, low, close, volume, close_time)
+             SELECT '1h', open_time, open, high, low, close, volume, close_time FROM candles_old",
+            [],
+        );
+        let _ = conn.execute("DROP TABLE candles_old", []);
+        println!("✅ Migración completada exitosamente.");
+    } else {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS candles (
+                timeframe TEXT NOT NULL,
+                open_time INTEGER NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume REAL NOT NULL,
+                close_time INTEGER NOT NULL,
+                PRIMARY KEY (timeframe, open_time)
+            )",
+            [],
+        )?;
+    }
+
+    // Get the last open_time from the database for this timeframe
+    let mut stmt = conn.prepare("SELECT MAX(open_time) FROM candles WHERE timeframe = ?1")?;
+    let last_time: Option<i64> = stmt.query_row([timeframe], |row| {
         let val: Option<f64> = row.get(0)?;
         Ok(val.map(|v| v as i64))
     }).unwrap_or(None);
 
     let start_time_millis = match last_time {
         Some(t) => {
-            println!("🔄 Datos existentes encontrados. Reanudando desde la última vela registrada...");
+            println!("🔄 Datos existentes encontrados para {}. Reanudando desde la última vela registrada...", timeframe);
             t + 1
         }
         None => {
             // 2020-04-20 00:00:00 UTC
-            println!("🆕 No se encontraron datos. Iniciando descarga desde el 20-04-2020...");
+            println!("🆕 No se encontraron datos para {}. Iniciando descarga desde el 20-04-2020...", timeframe);
             chrono::NaiveDate::from_ymd_opt(2020, 4, 20)
                 .unwrap()
                 .and_hms_opt(0, 0, 0)
@@ -89,8 +166,8 @@ async fn download_candles(db_path: &str) -> Result<(), Box<dyn std::error::Error
 
     loop {
         let url = format!(
-            "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&startTime={}&limit=1000",
-            current_start_time
+            "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval={}&startTime={}&limit=1000",
+            timeframe, current_start_time
         );
 
         let resp = client.get(&url).send().await?;
@@ -101,7 +178,7 @@ async fn download_candles(db_path: &str) -> Result<(), Box<dyn std::error::Error
 
         let klines: Vec<Vec<serde_json::Value>> = resp.json().await?;
         if klines.is_empty() {
-            println!("✅ Todas las velas descargadas.");
+            println!("✅ Todas las velas para {} descargadas.", timeframe);
             break;
         }
 
@@ -136,11 +213,12 @@ async fn download_candles(db_path: &str) -> Result<(), Box<dyn std::error::Error
         let tx = tx_conn.transaction()?;
         {
             let mut insert_stmt = tx.prepare(
-                "INSERT OR REPLACE INTO candles (open_time, open, high, low, close, volume, close_time)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                "INSERT OR REPLACE INTO candles (timeframe, open_time, open, high, low, close, volume, close_time)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             )?;
             for candle in &candles_batch {
-                insert_stmt.execute([
+                insert_stmt.execute(rusqlite::params![
+                    timeframe,
                     candle.open_time as f64,
                     candle.open,
                     candle.high,
@@ -168,17 +246,17 @@ async fn download_candles(db_path: &str) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-fn get_candles(db_path: &str, limit: Option<usize>) -> Result<Vec<Candle>, rusqlite::Error> {
+fn get_candles(db_path: &str, timeframe: &str, limit: Option<usize>) -> Result<Vec<Candle>, rusqlite::Error> {
     let conn = Connection::open(db_path)?;
     let query = match limit {
         Some(lim) => format!(
-            "SELECT open_time, open, high, low, close, volume, close_time FROM candles ORDER BY open_time ASC LIMIT {}",
+            "SELECT open_time, open, high, low, close, volume, close_time FROM candles WHERE timeframe = ?1 ORDER BY open_time ASC LIMIT {}",
             lim
         ),
-        None => "SELECT open_time, open, high, low, close, volume, close_time FROM candles ORDER BY open_time ASC".to_string(),
+        None => "SELECT open_time, open, high, low, close, volume, close_time FROM candles WHERE timeframe = ?1 ORDER BY open_time ASC".to_string(),
     };
     let mut stmt = conn.prepare(&query)?;
-    let candle_iter = stmt.query_map([], |row| {
+    let candle_iter = stmt.query_map([timeframe], |row| {
         Ok(Candle {
             open_time: row.get::<_, f64>(0)? as i64,
             open: row.get(1)?,
@@ -205,6 +283,15 @@ async fn call_gemma(
     system_prompt: &str,
     user_prompt: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let mut normalized_url = api_url.trim().to_string();
+    if !normalized_url.ends_with("/v1/chat/completions") {
+        if normalized_url.ends_with('/') {
+            normalized_url.push_str("v1/chat/completions");
+        } else {
+            normalized_url.push_str("/v1/chat/completions");
+        }
+    }
+
     let body = serde_json::json!({
         "messages": [
             { "role": "system", "content": system_prompt },
@@ -213,21 +300,26 @@ async fn call_gemma(
         "temperature": 0.2
     });
 
-    let resp = client.post(api_url)
+    let resp = client.post(&normalized_url)
         .bearer_auth(api_token)
         .json(&body)
         .send()
         .await?;
     if !resp.status().is_success() {
         let err_text = resp.text().await?;
-        return Err(format!("Error en respuesta de LM Studio ({}): {}", api_url, err_text).into());
+        return Err(format!("Error en respuesta de LM Studio ({}): {}", normalized_url, err_text).into());
     }
 
     let json_resp: serde_json::Value = resp.json().await?;
-    let content = json_resp["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or("No se encontró el contenido del mensaje en la respuesta de LM Studio")?
-        .to_string();
+    let content = match json_resp["choices"][0]["message"]["content"].as_str() {
+        Some(c) => c.to_string(),
+        None => {
+            return Err(format!(
+                "No se encontró el contenido del mensaje. Respuesta completa de LM Studio: {}",
+                json_resp
+            ).into());
+        }
+    };
 
     Ok(content)
 }
@@ -249,6 +341,7 @@ fn generate_dashboard(
     num_ventas: usize,
     num_liquidaciones: usize,
     max_drawdown: f64,
+    correlation: f64,
     filename: &str,
 ) -> Result<(), std::io::Error> {
     use std::fs::File;
@@ -332,7 +425,7 @@ fn generate_dashboard(
         </div>
 
         <!-- Secondary Metrics Row -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-6">
             <div class="bg-slate-900/40 backdrop-blur-md border border-slate-800/60 rounded-xl p-5 flex items-center justify-between">
                 <span class="text-slate-400 text-sm">Operaciones Totales</span>
                 <span class="text-xl font-semibold text-violet-400">{total_trades}</span>
@@ -348,6 +441,10 @@ fn generate_dashboard(
             <div class="bg-slate-900/40 backdrop-blur-md border border-slate-800/60 rounded-xl p-5 flex items-center justify-between">
                 <span class="text-slate-400 text-sm">Liquidaciones</span>
                 <span class="text-xl font-semibold {liq_color}">{num_liquidaciones}</span>
+            </div>
+            <div class="bg-slate-900/40 backdrop-blur-md border border-slate-800/60 rounded-xl p-5 flex items-center justify-between">
+                <span class="text-slate-400 text-sm">Corr. Buy & Hold</span>
+                <span class="text-xl font-semibold text-sky-400">{correlation:+.4}</span>
             </div>
         </div>
 
@@ -457,6 +554,7 @@ fn generate_dashboard(
         num_ventas = num_ventas,
         num_liquidaciones = num_liquidaciones,
         liq_color = if num_liquidaciones > 0 { "text-rose-500 animate-pulse" } else { "text-slate-400" },
+        correlation = correlation,
         labels_json = labels_json,
         data_json = data_json,
         bh_data_json = bh_data_json
@@ -484,9 +582,12 @@ fn get_liquidation_percentage(leverage: f64) -> f64 {
 
 async fn run_backtest(
     db_path: &str,
+    timeframe: &str,
+    leverage: f64,
+    risk_percent: f64,
     limit: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let candles = get_candles(db_path, limit)?;
+    let candles = get_candles(db_path, timeframe, limit)?;
     if candles.is_empty() {
         println!("❌ No hay velas en la base de datos. Descarga velas primero (Opción 1).");
         return Ok(());
@@ -501,13 +602,6 @@ async fn run_backtest(
     ));
     let mut saldo_usdt = 10000.0;
     
-    // Configuración de apalancamiento
-    let leverage = 10.0;
-    let mut position_type = PositionType::None;
-    let mut position_margin = 0.0;
-    let mut position_size_btc = 0.0;
-    let mut precio_entrada = 0.0;
-    let mut liquidation_price = 0.0;
     let fee_rate = 0.0005; // 0.05% comisión
 
     let mut num_compras = 0;
@@ -525,27 +619,31 @@ async fn run_backtest(
 
     let system_prompt = format!(
         "Eres un agente de trading experto para BTCUSDT en el mercado de futuros de criptomonedas. Tu objetivo es aumentar el valor total de tu cuenta en USDT.\n\
-         Operas en modo de MARGEN AISLADO (Isolated Margin) con apalancamiento 10X. En cada operación utilizas exactamente el 10% de tu saldo disponible total como margen.\n\
+         Operas en modo de MARGEN AISLADO (Isolated Margin) con apalancamiento {}X. En cada operación utilizas exactamente el {}% de tu equidad actual como margen.\n\
          Cada operación (apertura y cierre) tiene una comisión de transacción del 0.05% sobre el volumen de la posición (Volumen = Margen x Apalancamiento).\n\
          \n\
          REGLAS DE OPERATORIA:\n\
-         - Si no tienes posición abierta actualmente:\n\
-           * 'COMPRAR': Abre una posición LONG (Alza) con apalancamiento 10X utilizando el 10% de tu saldo disponible como margen.\n\
-           * 'VENDER': Abre una posición SHORT (Baja) con apalancamiento 10X utilizando el 10% de tu saldo disponible como margen.\n\
-           * 'MANTENER': No abres posición y te mantienes en cash (USDT).\n\
-         - Si tienes una posición LONG activa:\n\
-           * 'VENDER': Cierra la posición LONG actual a precio de mercado y te devuelve el margen restante más la ganancia/pérdida (menos comisiones).\n\
-           * 'COMPRAR' o 'MANTENER': Mantiene la posición LONG activa.\n\
-         - Si tienes una posición SHORT activa:\n\
-           * 'COMPRAR': Cierra la posición SHORT actual a precio de mercado y te devuelve el margen restante más la ganancia/pérdida (menos comisiones).\n\
-           * 'VENDER' o 'MANTENER': Mantiene la posición SHORT activa.\n\
+         - Si no tienes posiciones abiertas:\n\
+           * 'COMPRAR': Abre una posición LONG (Alza) con apalancamiento {}X utilizando el {}% de tu equidad como margen.\n\
+           * 'VENDER': Abre una posición SHORT (Baja) con apalancamiento {}X utilizando el {}% de tu equidad como margen.\n\
+           * 'MANTENER': No abres posición.\n\
+         - Si tienes posiciones LONG activas:\n\
+           * 'VENDER': Cierra TODAS las posiciones LONG actuales a precio de mercado y te devuelve el margen restante más la ganancia/pérdida (menos comisiones).\n\
+           * 'COMPRAR': Abre otra posición LONG (acumulando posiciones) utilizando el {}% de tu equidad actual como margen (si hay saldo disponible).\n\
+           * 'MANTENER': Mantiene las posiciones LONG activas.\n\
+         - Si tienes posiciones SHORT activas:\n\
+           * 'COMPRAR': Cierra TODAS las posiciones SHORT actuales a precio de mercado y te devuelve el margen restante más la ganancia/pérdida (menos comisiones).\n\
+           * 'VENDER': Abre otra posición SHORT (acumulando posiciones) utilizando el {}% de tu equidad actual como margen (si hay saldo disponible).\n\
+           * 'MANTENER': Mantiene las posiciones SHORT activas.\n\
          \n\
          Debes responder ESTRICTAMENTE en formato JSON con la siguiente estructura y nada más:\n\
          {{\n\
-           \"analisis\": \"Breve explicación del motivo de tu decisión fundamentada en el análisis de las velas recientes\",\n\
+           \"analisis\": \"Breve explicación del motivo de tu decisión fundamentada en el análisis de las velas recientes y las posiciones abiertas\",\n\
            \"accion\": \"COMPRAR\", \"VENDER\" o \"MANTENER\"\n\
-         }}"
+         }}", leverage, risk_percent, leverage, risk_percent, leverage, risk_percent, risk_percent, risk_percent
     );
+
+    let mut active_positions: Vec<Position> = Vec::new();
 
     for (i, candle) in candles.iter().enumerate() {
         let date_str = chrono::Utc.timestamp_millis_opt(candle.open_time)
@@ -556,47 +654,51 @@ async fn run_backtest(
         let precio_actual = candle.close;
 
         // 1. Verificar si hay liquidación en esta vela (usando high/low)
-        let mut liquidado = false;
-        if position_type != PositionType::None {
-            match position_type {
+        let mut liquidated_indices = Vec::new();
+        for (idx, pos) in active_positions.iter().enumerate() {
+            let mut liquidado = false;
+            match pos.position_type {
                 PositionType::Long => {
-                    if candle.low <= liquidation_price {
+                    if candle.low <= pos.liquidation_price {
                         liquidado = true;
                     }
                 }
                 PositionType::Short => {
-                    if candle.high >= liquidation_price {
+                    if candle.high >= pos.liquidation_price {
                         liquidado = true;
                     }
                 }
                 _ => {}
             }
+            if liquidado {
+                liquidated_indices.push(idx);
+            }
         }
 
-        if liquidado {
+        // Process liquidations from last to first
+        liquidated_indices.reverse();
+        for idx in liquidated_indices {
+            let pos = active_positions.remove(idx);
             println!("🔥 LIQUIDACIÓN DETECTADA: La posición {:?} fue liquidada al tocar el precio de {:.2} USDT (Entrada: {:.2} USDT). Se perdió el margen de {:.2} USDT.",
-                position_type, liquidation_price, precio_entrada, position_margin
+                pos.position_type, pos.liquidation_price, pos.entry_price, pos.margin
             );
-            position_type = PositionType::None;
-            position_margin = 0.0;
-            position_size_btc = 0.0;
-            precio_entrada = 0.0;
-            liquidation_price = 0.0;
             num_liquidaciones += 1;
         }
 
         // 2. Calcular PnL flotante y equidad
-        let floating_pnl = match position_type {
-            PositionType::Long => (precio_actual - precio_entrada) * position_size_btc,
-            PositionType::Short => (precio_entrada - precio_actual) * position_size_btc,
-            PositionType::None => 0.0,
-        };
+        let mut total_floating_pnl = 0.0;
+        let mut total_margins = 0.0;
+        for pos in &active_positions {
+            let pnl = match pos.position_type {
+                PositionType::Long => (precio_actual - pos.entry_price) * pos.size_btc,
+                PositionType::Short => (pos.entry_price - precio_actual) * pos.size_btc,
+                _ => 0.0,
+            };
+            total_floating_pnl += pnl;
+            total_margins += pos.margin;
+        }
 
-        let equity = if position_type != PositionType::None {
-            saldo_usdt + position_margin + floating_pnl
-        } else {
-            saldo_usdt
-        };
+        let equity = saldo_usdt + total_margins + total_floating_pnl;
 
         let bh_equity = initial_balance * (candle.close / initial_price);
         equity_curve.push((date_str.clone(), equity, bh_equity));
@@ -610,8 +712,8 @@ async fn run_backtest(
         }
 
         println!("\n=== [Paso {}/{}] {} | Precio Actual: {:.2} USDT ===", i + 1, candles.len(), date_str, precio_actual);
-        println!("💼 Estado: Saldo: {:.2} USDT | Margen: {:.2} USDT ({:?}) | Entrada: {:.2} USDT | PnL Flotante: {:.2} USDT | Equity: {:.2} USDT",
-            saldo_usdt, position_margin, position_type, precio_entrada, floating_pnl, equity
+        println!("💼 Estado: Saldo: {:.2} USDT | Margen Total: {:.2} USDT | Posiciones Activas: {} | PnL Flotante: {:.2} USDT | Equity: {:.2} USDT",
+            saldo_usdt, total_margins, active_positions.len(), total_floating_pnl, equity
         );
 
         // 3. Generar la ventana deslizante
@@ -635,6 +737,24 @@ async fn run_backtest(
             ));
         }
 
+        // List open positions for prompt
+        let mut positions_str = String::new();
+        if active_positions.is_empty() {
+            positions_str.push_str("- Ninguna posición activa.");
+        } else {
+            for (idx, pos) in active_positions.iter().enumerate() {
+                let pnl = match pos.position_type {
+                    PositionType::Long => (precio_actual - pos.entry_price) * pos.size_btc,
+                    PositionType::Short => (pos.entry_price - precio_actual) * pos.size_btc,
+                    _ => 0.0,
+                };
+                positions_str.push_str(&format!(
+                    "- Posición #{}: {:?} | Entrada: {:.2} USDT | Margen: {:.2} USDT | Tamaño: {:.6} BTC | Liq: {:.2} USDT | PnL Flotante: {:.2} USDT\n",
+                    idx + 1, pos.position_type, pos.entry_price, pos.margin, pos.size_btc, pos.liquidation_price, pnl
+                ));
+            }
+        }
+
         // 4. Prompt a Gemma
         let user_prompt = format!(
             "Precio actual de BTC (Cierre): {:.2} USDT\n\n\
@@ -642,18 +762,13 @@ async fn run_backtest(
              {}\n\
              Estado de tu Cartera:\n\
              - Saldo libre en USDT (no en margen): {:.2} USDT\n\
-             - Posición activa: {:?}\n\
-             - Margen de la posición: {:.2} USDT (Modo Aislado)\n\
-             - Tamaño de posición equivalente: {:.6} BTC (${:.2})\n\
-             - Precio de entrada: {:.2} USDT\n\
-             - Precio de liquidación estimado: {:.2} USDT (Si se mueve {:.3}% en contra)\n\
-             - PnL Flotante actual: {:.2} USDT\n\
+             - Posiciones Activas:\n\
+             {}\n\
              - Equidad total de la cuenta (Equity): {:.2} USDT\n\
+             - Apalancamiento actual: {:.1}x\n\
              - Comisión por operación: 0.05% sobre el volumen operado\n\n\
              ¿Qué acción tomas? Responde estrictamente en formato JSON.",
-            precio_actual, history_str, saldo_usdt, position_type, position_margin,
-            position_size_btc, position_size_btc * precio_actual, precio_entrada, liquidation_price, liq_percent,
-            floating_pnl, equity
+            precio_actual, history_str, saldo_usdt, positions_str, equity, leverage
         );
 
         let mut retries = 3;
@@ -702,97 +817,97 @@ async fn run_backtest(
 
         // 5. Ejecutar la acción elegida
         if gemma_action == "COMPRAR" {
-            match position_type {
-                PositionType::None => {
-                    // Abrir LONG con 10% del balance
-                    let margin = equity * 0.1;
-                    let size_usdt = margin * leverage;
-                    let opening_fee = size_usdt * fee_rate;
+            let has_shorts = active_positions.iter().any(|p| p.position_type == PositionType::Short);
+            if has_shorts {
+                // Cerrar todos los SHORTS
+                let mut temp_positions = Vec::new();
+                std::mem::swap(&mut active_positions, &mut temp_positions);
+                for pos in temp_positions {
+                    if pos.position_type == PositionType::Short {
+                        let closing_value = pos.size_btc * precio_actual;
+                        let closing_fee = closing_value * fee_rate;
+                        let real_pnl = (pos.entry_price - precio_actual) * pos.size_btc;
+                        let return_value = pos.margin + real_pnl - closing_fee;
 
-                    if saldo_usdt >= margin + opening_fee {
-                        saldo_usdt -= margin + opening_fee;
-                        position_type = PositionType::Long;
-                        position_margin = margin;
-                        position_size_btc = size_usdt / precio_actual;
-                        precio_entrada = precio_actual;
-                        liquidation_price = precio_entrada * (1.0 - liq_percent / 100.0);
-                        num_compras += 1;
-                        println!("🛒 LONG ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
-                            margin, position_size_btc, size_usdt, liquidation_price, opening_fee
+                        saldo_usdt += return_value;
+                        println!("💰 SHORT CERRADO: Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
+                            return_value, closing_fee, real_pnl
                         );
                     } else {
-                        println!("⏳ Margen/saldo insuficiente para abrir LONG.");
+                        active_positions.push(pos);
                     }
                 }
-                PositionType::Short => {
-                    // Cerrar SHORT
-                    let closing_value = position_size_btc * precio_actual;
-                    let closing_fee = closing_value * fee_rate;
-                    let real_pnl = (precio_entrada - precio_actual) * position_size_btc;
-                    let return_value = position_margin + real_pnl - closing_fee;
+                num_compras += 1;
+            } else {
+                // Abrir nuevo LONG
+                let margin = equity * (risk_percent / 100.0);
+                let size_usdt = margin * leverage;
+                let opening_fee = size_usdt * fee_rate;
 
-                    saldo_usdt += return_value;
+                if saldo_usdt >= margin + opening_fee {
+                    saldo_usdt -= margin + opening_fee;
+                    let pos_size_btc = size_usdt / precio_actual;
+                    let pos_liq_price = precio_actual * (1.0 - liq_percent / 100.0);
+                    active_positions.push(Position {
+                        position_type: PositionType::Long,
+                        margin,
+                        size_btc: pos_size_btc,
+                        entry_price: precio_actual,
+                        liquidation_price: pos_liq_price,
+                    });
                     num_compras += 1;
-                    println!("💰 SHORT CERRADO: Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
-                        return_value, closing_fee, real_pnl
+                    println!("🛒 LONG ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
+                        margin, pos_size_btc, size_usdt, pos_liq_price, opening_fee
                     );
-
-                    // Reset
-                    position_type = PositionType::None;
-                    position_margin = 0.0;
-                    position_size_btc = 0.0;
-                    precio_entrada = 0.0;
-                    liquidation_price = 0.0;
-                }
-                PositionType::Long => {
-                    println!("⏳ Ya tienes una posición LONG activa. Manteniendo...");
+                } else {
+                    println!("⏳ Margen/saldo insuficiente para abrir LONG.");
                 }
             }
         } else if gemma_action == "VENDER" {
-            match position_type {
-                PositionType::None => {
-                    // Abrir SHORT con 10% del balance
-                    let margin = equity * 0.1;
-                    let size_usdt = margin * leverage;
-                    let opening_fee = size_usdt * fee_rate;
+            let has_longs = active_positions.iter().any(|p| p.position_type == PositionType::Long);
+            if has_longs {
+                // Cerrar todos los LONGS
+                let mut temp_positions = Vec::new();
+                std::mem::swap(&mut active_positions, &mut temp_positions);
+                for pos in temp_positions {
+                    if pos.position_type == PositionType::Long {
+                        let closing_value = pos.size_btc * precio_actual;
+                        let closing_fee = closing_value * fee_rate;
+                        let real_pnl = (precio_actual - pos.entry_price) * pos.size_btc;
+                        let return_value = pos.margin + real_pnl - closing_fee;
 
-                    if saldo_usdt >= margin + opening_fee {
-                        saldo_usdt -= margin + opening_fee;
-                        position_type = PositionType::Short;
-                        position_margin = margin;
-                        position_size_btc = size_usdt / precio_actual;
-                        precio_entrada = precio_actual;
-                        liquidation_price = precio_entrada * (1.0 + liq_percent / 100.0);
-                        num_ventas += 1;
-                        println!("🛒 SHORT ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
-                            margin, position_size_btc, size_usdt, liquidation_price, opening_fee
+                        saldo_usdt += return_value;
+                        println!("💰 LONG CERRADO: Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
+                            return_value, closing_fee, real_pnl
                         );
                     } else {
-                        println!("⏳ Margen/saldo insuficiente para abrir SHORT.");
+                        active_positions.push(pos);
                     }
                 }
-                PositionType::Long => {
-                    // Cerrar LONG
-                    let closing_value = position_size_btc * precio_actual;
-                    let closing_fee = closing_value * fee_rate;
-                    let real_pnl = (precio_actual - precio_entrada) * position_size_btc;
-                    let return_value = position_margin + real_pnl - closing_fee;
+                num_ventas += 1;
+            } else {
+                // Abrir nuevo SHORT
+                let margin = equity * (risk_percent / 100.0);
+                let size_usdt = margin * leverage;
+                let opening_fee = size_usdt * fee_rate;
 
-                    saldo_usdt += return_value;
+                if saldo_usdt >= margin + opening_fee {
+                    saldo_usdt -= margin + opening_fee;
+                    let pos_size_btc = size_usdt / precio_actual;
+                    let pos_liq_price = precio_actual * (1.0 + liq_percent / 100.0);
+                    active_positions.push(Position {
+                        position_type: PositionType::Short,
+                        margin,
+                        size_btc: pos_size_btc,
+                        entry_price: precio_actual,
+                        liquidation_price: pos_liq_price,
+                    });
                     num_ventas += 1;
-                    println!("💰 LONG CERRADO: Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
-                        return_value, closing_fee, real_pnl
+                    println!("🛒 SHORT ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
+                        margin, pos_size_btc, size_usdt, pos_liq_price, opening_fee
                     );
-
-                    // Reset
-                    position_type = PositionType::None;
-                    position_margin = 0.0;
-                    position_size_btc = 0.0;
-                    precio_entrada = 0.0;
-                    liquidation_price = 0.0;
-                }
-                PositionType::Short => {
-                    println!("⏳ Ya tienes una posición SHORT activa. Manteniendo...");
+                } else {
+                    println!("⏳ Margen/saldo insuficiente para abrir SHORT.");
                 }
             }
         } else {
@@ -804,22 +919,30 @@ async fn run_backtest(
     }
 
     // Guardar Equity Curve
-    let final_equity = if position_type != PositionType::None {
-        let final_pnl = match position_type {
-            PositionType::Long => (candles.last().unwrap().close - precio_entrada) * position_size_btc,
-            PositionType::Short => (precio_entrada - candles.last().unwrap().close) * position_size_btc,
-            PositionType::None => 0.0,
+    let mut final_floating_pnl = 0.0;
+    let mut final_margins = 0.0;
+    for pos in &active_positions {
+        let pnl = match pos.position_type {
+            PositionType::Long => (candles.last().unwrap().close - pos.entry_price) * pos.size_btc,
+            PositionType::Short => (pos.entry_price - candles.last().unwrap().close) * pos.size_btc,
+            _ => 0.0,
         };
-        saldo_usdt + position_margin + final_pnl
-    } else {
-        saldo_usdt
-    };
+        final_floating_pnl += pnl;
+        final_margins += pos.margin;
+    }
+    let final_equity = saldo_usdt + final_margins + final_floating_pnl;
 
     println!("\n🏁 Backtest completado.");
     println!("📈 Equidad Final: {:.2} USDT", final_equity);
+
+    let bot_equity_series: Vec<f64> = equity_curve.iter().map(|(_, eq, _)| *eq).collect();
+    let bh_equity_series: Vec<f64> = equity_curve.iter().map(|(_, _, bh)| *bh).collect();
+    let correlation = calculate_correlation(&bot_equity_series, &bh_equity_series);
+    println!("📈 Correlación con Buy & Hold: {:.4}", correlation);
+
     save_equity_curve(&equity_curve, "equity_curve.csv")?;
     println!("📊 Curva de equidad guardada en 'equity_curve.csv'");
-    generate_dashboard(&equity_curve, num_compras, num_ventas, num_liquidaciones, max_drawdown, "dashboard.html")?;
+    generate_dashboard(&equity_curve, num_compras, num_ventas, num_liquidaciones, max_drawdown, correlation, "dashboard.html")?;
     println!("🖥️ Dashboard interactivo guardado en 'dashboard.html'");
 
     Ok(())
@@ -1253,14 +1376,14 @@ fn delete_api_config(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn get_latest_candles(db_path: &str, limit: usize) -> Result<Vec<Candle>, rusqlite::Error> {
+fn get_latest_candles(db_path: &str, timeframe: &str, limit: usize) -> Result<Vec<Candle>, rusqlite::Error> {
     let conn = Connection::open(db_path)?;
     let query = format!(
-        "SELECT open_time, open, high, low, close, volume, close_time FROM candles ORDER BY open_time DESC LIMIT {}",
+        "SELECT open_time, open, high, low, close, volume, close_time FROM candles WHERE timeframe = ?1 ORDER BY open_time DESC LIMIT {}",
         limit
     );
     let mut stmt = conn.prepare(&query)?;
-    let candle_iter = stmt.query_map([], |row| {
+    let candle_iter = stmt.query_map([timeframe], |row| {
         Ok(Candle {
             open_time: row.get::<_, f64>(0)? as i64,
             open: row.get(1)?,
@@ -1283,6 +1406,7 @@ fn get_latest_candles(db_path: &str, limit: usize) -> Result<Vec<Candle>, rusqli
 
 async fn run_live_gemma_step(
     db_path: &str,
+    timeframe: &str,
     client: &reqwest::Client,
     api_key: &str,
     api_secret: &str,
@@ -1290,7 +1414,7 @@ async fn run_live_gemma_step(
     use_testnet: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Fetch latest 10 candles from DB
-    let candles = get_latest_candles(db_path, 10)?;
+    let candles = get_latest_candles(db_path, timeframe, 10)?;
     if candles.len() < 10 {
         return Err("No hay suficientes velas en la base de datos (se requieren al menos 10).".into());
     }
@@ -1760,7 +1884,17 @@ async fn trading_en_vivo_menu(db_path: &str, client: &reqwest::Client) -> Result
                         match get_stable_balance(client, &api_key, &api_secret, use_testnet).await {
                             Ok(balance) => {
                                 println!("✅ Conexión con BingX exitosa. Capital inicial: ${:.2} USDT", balance);
-                                println!("🤖 Iniciando bucle de trading automatizado con Gemma.");
+                                
+                                println!("Selecciona la temporalidad para operar en vivo:");
+                                println!("1) 1H (1 Hora)");
+                                println!("2) 4H (4 Horas)");
+                                print!("Selecciona: ");
+                                io::stdout().flush()?;
+                                let mut tf_input = String::new();
+                                io::stdin().read_line(&mut tf_input)?;
+                                let timeframe = if tf_input.trim() == "2" { "4h" } else { "1h" };
+
+                                println!("🤖 Iniciando bucle de trading automatizado con Gemma ({}).", timeframe);
                                 println!("Presione ENTER para detener y volver al menú anterior en cualquier momento.");
                                 
                                 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1777,23 +1911,24 @@ async fn trading_en_vivo_menu(db_path: &str, client: &reqwest::Client) -> Result
                                 
                                 while !stop_signal.load(Ordering::SeqCst) {
                                     // Update candles first
-                                    println!("🔄 Actualizando velas desde Binance...");
-                                    if let Err(e) = download_candles(db_path).await {
+                                    println!("🔄 Actualizando velas desde Binance ({})...", timeframe);
+                                    if let Err(e) = download_candles(db_path, timeframe).await {
                                         println!("⚠️ Error descargando velas: {}", e);
                                     }
                                     
                                     // Run one live step
-                                    println!("🧠 Evaluando mercado con Gemma...");
-                                    if let Err(e) = run_live_gemma_step(db_path, client, &api_key, &api_secret, leverage, use_testnet).await {
+                                    println!("🧠 Evaluando mercado con Gemma ({})...", timeframe);
+                                    if let Err(e) = run_live_gemma_step(db_path, timeframe, client, &api_key, &api_secret, leverage, use_testnet).await {
                                         println!("⚠️ Error en el paso de trading: {}", e);
                                     }
                                     
-                                    // Wait until next hour closes (or check stop_signal every 5 seconds)
+                                    // Wait until next hour/4-hour closes (or check stop_signal every 5 seconds)
                                     let now = chrono::Utc::now().timestamp();
-                                    let seconds_until_next_hour = 3600 - (now % 3600);
-                                    let sleep_secs = seconds_until_next_hour + 10; // 10 seconds buffer
+                                    let interval_secs = if timeframe == "4h" { 14400 } else { 3600 };
+                                    let seconds_until_next_candle = interval_secs - (now % interval_secs);
+                                    let sleep_secs = seconds_until_next_candle + 10; // 10 seconds buffer
                                     
-                                    println!("⏰ Esperando al próximo cierre de vela ({} segundos)...", sleep_secs);
+                                    println!("⏰ Esperando al próximo cierre de vela de {} ({} segundos)...", timeframe, sleep_secs);
                                     
                                     let mut elapsed = 0;
                                     while elapsed < sleep_secs && !stop_signal.load(Ordering::SeqCst) {
@@ -1845,11 +1980,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match choice {
             "1" => {
-                if let Err(e) = download_candles(db_path).await {
-                    println!("❌ Error al descargar velas: {}", e);
+                println!("\nSeleccione temporalidad a descargar:");
+                println!("1) 1H (1 Hora)");
+                println!("2) 4H (4 Horas)");
+                println!("3) Ambas");
+                print!("Selecciona una opción: ");
+                let _ = io::stdout().flush();
+                let mut tf_choice = String::new();
+                let mut timeframes = Vec::new();
+                if io::stdin().read_line(&mut tf_choice).is_ok() {
+                    match tf_choice.trim() {
+                        "2" => timeframes.push("4h"),
+                        "3" => {
+                            timeframes.push("1h");
+                            timeframes.push("4h");
+                        }
+                        _ => timeframes.push("1h"),
+                    }
+                } else {
+                    timeframes.push("1h");
+                }
+
+                for tf in timeframes {
+                    println!("🔄 Descargando/Actualizando velas de {}...", tf);
+                    if let Err(e) = download_candles(db_path, tf).await {
+                        println!("❌ Error al descargar velas de {}: {}", tf, e);
+                    }
                 }
             }
             "2" => {
+                println!("\nSelecciona la temporalidad para el backtest:");
+                println!("1) 1H (1 Hora)");
+                println!("2) 4H (4 Horas)");
+                print!("Selecciona una opción: ");
+                let _ = io::stdout().flush();
+                let mut tf_choice = String::new();
+                let timeframe = if io::stdin().read_line(&mut tf_choice).is_ok() && tf_choice.trim() == "2" {
+                    "4h"
+                } else {
+                    "1h"
+                };
+
+                print!("Introduce el apalancamiento a usar (ej. 10): ");
+                let _ = io::stdout().flush();
+                let mut lev_input = String::new();
+                let mut leverage = 10.0;
+                if io::stdin().read_line(&mut lev_input).is_ok() {
+                    if let Ok(num) = lev_input.trim().parse::<f64>() {
+                        if num > 0.0 {
+                            leverage = num;
+                        }
+                    }
+                }
+
+                print!("Introduce el porcentaje de capital a arriesgar por operación (ej. 10 para 10%): ");
+                let _ = io::stdout().flush();
+                let mut risk_input = String::new();
+                let mut risk_percent = 10.0;
+                if io::stdin().read_line(&mut risk_input).is_ok() {
+                    if let Ok(num) = risk_input.trim().parse::<f64>() {
+                        if num > 0.0 && num <= 100.0 {
+                            risk_percent = num;
+                        }
+                    }
+                }
+
                 print!("Introduce la cantidad de velas para el backtest (0 para evaluar todas): ");
                 let _ = io::stdout().flush();
                 let mut limit_input = String::new();
@@ -1861,12 +2056,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                if let Err(e) = run_backtest(db_path, limit).await {
+                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, limit).await {
                     println!("❌ Error en el backtest: {}", e);
                 }
             }
             "3" => {
-                if let Err(e) = run_backtest(db_path, Some(10)).await {
+                println!("\nSelecciona la temporalidad para la prueba de backtest:");
+                println!("1) 1H (1 Hora)");
+                println!("2) 4H (4 Horas)");
+                print!("Selecciona una opción: ");
+                let _ = io::stdout().flush();
+                let mut tf_choice = String::new();
+                let timeframe = if io::stdin().read_line(&mut tf_choice).is_ok() && tf_choice.trim() == "2" {
+                    "4h"
+                } else {
+                    "1h"
+                };
+
+                print!("Introduce el apalancamiento a usar (ej. 10): ");
+                let _ = io::stdout().flush();
+                let mut lev_input = String::new();
+                let mut leverage = 10.0;
+                if io::stdin().read_line(&mut lev_input).is_ok() {
+                    if let Ok(num) = lev_input.trim().parse::<f64>() {
+                        if num > 0.0 {
+                            leverage = num;
+                        }
+                    }
+                }
+
+                print!("Introduce el porcentaje de capital a arriesgar por operación (ej. 10 para 10%): ");
+                let _ = io::stdout().flush();
+                let mut risk_input = String::new();
+                let mut risk_percent = 10.0;
+                if io::stdin().read_line(&mut risk_input).is_ok() {
+                    if let Ok(num) = risk_input.trim().parse::<f64>() {
+                        if num > 0.0 && num <= 100.0 {
+                            risk_percent = num;
+                        }
+                    }
+                }
+
+                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, Some(10)).await {
                     println!("❌ Error en la prueba: {}", e);
                 }
             }
