@@ -17,6 +17,7 @@ struct Position {
     size_btc: f64,
     entry_price: f64,
     liquidation_price: f64,
+    stop_loss: Option<f64>,
 }
 
 fn calculate_correlation(series_a: &[f64], series_b: &[f64]) -> f64 {
@@ -58,8 +59,13 @@ struct Candle {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct GemmaResponse {
-    analisis: String,
+    #[serde(default)]
+    analisis: Option<String>,
     accion: String, // "COMPRAR", "VENDER", "MANTENER"
+    #[serde(default)]
+    cerrar_posiciones: Option<Vec<usize>>, // Indices 1-based de posiciones a cerrar
+    #[serde(default)]
+    stop_losses: Option<Vec<Option<f64>>>, // Stop losses correspondientes a las posiciones
 }
 
 fn parse_gemma_response(text: &str) -> Option<GemmaResponse> {
@@ -355,9 +361,17 @@ fn generate_dashboard(
         0.0
     };
 
-    let labels: Vec<String> = curve.iter().map(|(time, _, _)| time.clone()).collect();
-    let data: Vec<f64> = curve.iter().map(|(_, eq, _)| *eq).collect();
-    let bh_data: Vec<f64> = curve.iter().map(|(_, _, bh)| *bh).collect();
+    let mut labels = Vec::new();
+    let mut data = Vec::new();
+    let mut bh_data = Vec::new();
+
+    for (idx, (time, eq, bh)) in curve.iter().enumerate() {
+        if idx == 0 || (idx + 1) % 10 == 0 || idx == curve.len() - 1 {
+            labels.push(time.clone());
+            data.push(*eq);
+            bh_data.push(*bh);
+        }
+    }
 
     let labels_json = serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string());
     let data_json = serde_json::to_string(&data).unwrap_or_else(|_| "[]".to_string());
@@ -638,27 +652,29 @@ async fn run_backtest(
     let system_prompt = format!(
         "Eres un agente de trading experto para BTCUSDT en el mercado de futuros de criptomonedas. Tu objetivo es aumentar el valor total de tu cuenta en USDT.\n\
          Operas en modo de MARGEN AISLADO (Isolated Margin) con apalancamiento {}X. En cada operación utilizas exactamente el {}% de tu equidad actual como margen.\n\
-         Cada operación (apertura y cierre) tiene una comisión de transacción del 0.05% sobre el volumen de la posición (Volumen = Margen x Apalancamiento).\n\
-         \n\
+         Cada operación (apertura y cierre) tiene una comisión de transacción del 0.05% sobre el volumen de la posición (Volumen = Margen x Apalancamiento).\n\n\
+         REGLAS DE GESTIÓN DE RIESGO Y POSICIONES (ESTRATEGIA ALLIANZ):\n\
+         - ESTRATEGIA PARA ABRIR NUEVAS POSICIONES: Si ya tienes posiciones abiertas, no debes abrir posiciones adicionales una detrás de la otra (lo cual es equivalente a ir \"All in\" con pocos días de diferencia). Solo se te permite abrir una NUEVA posición en la misma dirección si alguna de tus posiciones existentes ya acumula más de un +200% de ganancia (ROE). De esta manera, si la nueva posición sale mal y se liquida o toca el SL, puedes cerrar la primera posición con al menos +100% de ganancia, asegurando un beneficio neto general (\"salvar la posición\").\n\
+         - STOP LOSS (SL): Puedes definir o actualizar un Stop Loss (SL) para cada posición activa. Si el precio toca el SL, la posición se cerrará automáticamente en ese nivel. El SL puede colocarse incluso en zonas de ganancia (por encima del precio de entrada para LONG, o por debajo para SHORT) para asegurar beneficios.\n\
+         - CIERRE PARCIAL: Si tienes más de una posición activa, puedes decidir cerrar posiciones específicas de forma selectiva indicando sus índices (1-based).\n\n\
          REGLAS DE OPERATORIA:\n\
          - Si no tienes posiciones abiertas:\n\
            * 'COMPRAR': Abre una posición LONG (Alza) con apalancamiento {}X utilizando el {}% de tu equidad como margen.\n\
            * 'VENDER': Abre una posición SHORT (Baja) con apalancamiento {}X utilizando el {}% de tu equidad como margen.\n\
            * 'MANTENER': No abres posición.\n\
          - Si tienes posiciones LONG activas:\n\
-           * 'VENDER': Cierra TODAS las posiciones LONG actuales a precio de mercado y te devuelve el margen restante más la ganancia/pérdida (menos comisiones).\n\
-           * 'COMPRAR': Abre otra posición LONG (acumulando posiciones) utilizando el {}% de tu equidad actual como margen (si hay saldo disponible).\n\
-           * 'MANTENER': Mantiene las posiciones LONG activas.\n\
+           * 'Comprar': Abre otra posición LONG (acumulando posiciones) utilizando el {}% de tu equidad actual como margen (si hay saldo disponible y cumples la Estrategia Allianz de ROE > 200%).\n\
+           * 'Mantener': Mantiene las posiciones LONG activas.\n\
          - Si tienes posiciones SHORT activas:\n\
-           * 'COMPRAR': Cierra TODAS las posiciones SHORT actuales a precio de mercado y te devuelve el margen restante más la ganancia/pérdida (menos comisiones).\n\
-           * 'VENDER': Abre otra posición SHORT (acumulando posiciones) utilizando el {}% de tu equidad actual como margen (si hay saldo disponible).\n\
-           * 'MANTENER': Mantiene las posiciones SHORT activas.\n\
-         \n\
+           * 'Vender': Abre otra posición SHORT (acumulando posiciones) utilizando el {}% de tu equidad actual como margen (si hay saldo disponible y cumples la Estrategia Allianz de ROE > 200%).\n\
+           * 'Mantener': Mantiene las posiciones SHORT activas.\n\n\
          Debes responder ESTRICTAMENTE en formato JSON con la siguiente estructura y nada más:\n\
          {{\n\
-           \"analisis\": \"Breve explicación del motivo de tu decisión fundamentada en el análisis de las velas recientes y las posiciones abiertas\",\n\
-           \"accion\": \"COMPRAR\", \"VENDER\" o \"MANTENER\"\n\
-         }}", leverage, risk_percent, leverage, risk_percent, leverage, risk_percent, risk_percent, risk_percent
+           \"accion\": \"COMPRAR\", \"VENDER\" o \"MANTENER\",\n\
+           \"cerrar_posiciones\": [1], // Un array con los índices (1-based) de las posiciones activas que deseas cerrar (ej. [1], [1, 2] o [] si ninguno).\n\
+           \"stop_losses\": [61000.0, null] // Un array de números (o null si no tiene SL) para actualizar el Stop Loss de CADA una de tus posiciones activas actuales en orden.\n\
+         }}\n\n\
+         No incluyas explicaciones ni análisis adicionales en tu respuesta. Responde únicamente con el objeto JSON.", leverage, risk_percent, leverage, risk_percent, leverage, risk_percent, risk_percent, risk_percent
     );
 
     let mut active_positions: Vec<Position> = Vec::new();
@@ -672,36 +688,62 @@ async fn run_backtest(
 
         let precio_actual = candle.close;
 
-        // 1. Verificar si hay liquidación en esta vela (usando high/low)
-        let mut liquidated_indices = Vec::new();
+        // 1. Verificar si hay liquidación o ejecución de SL en esta vela (usando high/low)
+        let mut closed_indices = Vec::new();
         for (idx, pos) in active_positions.iter().enumerate() {
             let mut liquidado = false;
+            let mut hit_sl = false;
             match pos.position_type {
                 PositionType::Long => {
                     if candle.low <= pos.liquidation_price {
                         liquidado = true;
+                    } else if let Some(sl) = pos.stop_loss {
+                        if candle.low <= sl {
+                            hit_sl = true;
+                        }
                     }
                 }
                 PositionType::Short => {
                     if candle.high >= pos.liquidation_price {
                         liquidado = true;
+                    } else if let Some(sl) = pos.stop_loss {
+                        if candle.high >= sl {
+                            hit_sl = true;
+                        }
                     }
                 }
                 _ => {}
             }
             if liquidado {
-                liquidated_indices.push(idx);
+                closed_indices.push((idx, true, pos.liquidation_price));
+            } else if hit_sl {
+                closed_indices.push((idx, false, pos.stop_loss.unwrap()));
             }
         }
 
-        // Process liquidations from last to first
-        liquidated_indices.reverse();
-        for idx in liquidated_indices {
+        // Process closures from last to first
+        closed_indices.reverse();
+        for (idx, is_liq, exit_price) in closed_indices {
             let pos = active_positions.remove(idx);
-            println!("🔥 LIQUIDACIÓN DETECTADA: La posición {:?} fue liquidada al tocar el precio de {:.2} USDT (Entrada: {:.2} USDT). Se perdió el margen de {:.2} USDT.",
-                pos.position_type, pos.liquidation_price, pos.entry_price, pos.margin
-            );
-            num_liquidaciones += 1;
+            if is_liq {
+                println!("🔥 LIQUIDACIÓN DETECTADA: La posición {:?} fue liquidada al tocar el precio de {:.2} USDT (Entrada: {:.2} USDT). Se perdió el margen de {:.2} USDT.",
+                    pos.position_type, pos.liquidation_price, pos.entry_price, pos.margin
+                );
+                num_liquidaciones += 1;
+            } else {
+                let closing_value = pos.size_btc * exit_price;
+                let closing_fee = closing_value * fee_rate;
+                let real_pnl = match pos.position_type {
+                    PositionType::Long => (exit_price - pos.entry_price) * pos.size_btc,
+                    PositionType::Short => (pos.entry_price - exit_price) * pos.size_btc,
+                    _ => 0.0,
+                };
+                let return_value = pos.margin + real_pnl - closing_fee;
+                saldo_usdt += return_value;
+                println!("🛑 STOP LOSS EJECUTADO: Posición {:?} cerrada a {:.2} USDT (Entrada: {:.2} USDT). Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
+                    pos.position_type, exit_price, pos.entry_price, return_value, closing_fee, real_pnl
+                );
+            }
         }
 
         // 2. Calcular PnL flotante y equidad
@@ -767,9 +809,14 @@ async fn run_backtest(
                     PositionType::Short => (pos.entry_price - precio_actual) * pos.size_btc,
                     _ => 0.0,
                 };
+                let roe = (pnl / pos.margin) * 100.0;
+                let sl_str = match pos.stop_loss {
+                    Some(sl) => format!("{:.2} USDT", sl),
+                    None => "Ninguno".to_string(),
+                };
                 positions_str.push_str(&format!(
-                    "- Posición #{}: {:?} | Entrada: {:.2} USDT | Margen: {:.2} USDT | Tamaño: {:.6} BTC | Liq: {:.2} USDT | PnL Flotante: {:.2} USDT\n",
-                    idx + 1, pos.position_type, pos.entry_price, pos.margin, pos.size_btc, pos.liquidation_price, pnl
+                    "- Posición #{}: {:?} | Entrada: {:.2} USDT | Margen: {:.2} USDT | Tamaño: {:.6} BTC | Liq: {:.2} USDT | SL: {} | PnL Flotante: {:.2} USDT (ROE: {:.2}%)\n",
+                    idx + 1, pos.position_type, pos.entry_price, pos.margin, pos.size_btc, pos.liquidation_price, sl_str, pnl, roe
                 ));
             }
         }
@@ -792,14 +839,49 @@ async fn run_backtest(
 
         let mut retries = 3;
         let mut gemma_action = "MANTENER".to_string();
-        let mut gemma_analisis = "Error al obtener respuesta".to_string();
+        let mut gemma_analisis = "Sin análisis".to_string();
 
         while retries > 0 {
             match call_gemma(&client, &api_url, &api_token, &system_prompt, &user_prompt).await {
                 Ok(content) => {
                     if let Some(parsed) = parse_gemma_response(&content) {
                         gemma_action = parsed.accion.to_uppercase();
-                        gemma_analisis = parsed.analisis;
+                        if let Some(ref ans) = parsed.analisis {
+                            gemma_analisis = ans.clone();
+                        }
+                        
+                        // Apply Stop Loss updates
+                        if let Some(ref sls) = parsed.stop_losses {
+                            for (idx, sl_val) in sls.iter().enumerate() {
+                                if idx < active_positions.len() {
+                                    active_positions[idx].stop_loss = *sl_val;
+                                    println!("⚙️ STOP LOSS ACTUALIZADO: Posición #{} -> {:?}", idx + 1, sl_val);
+                                }
+                            }
+                        }
+
+                        // Apply partial closures
+                        if let Some(ref indices_to_close) = parsed.cerrar_posiciones {
+                            let mut sorted_indices = indices_to_close.clone();
+                            sorted_indices.sort_by(|a, b| b.cmp(a));
+                            for idx_1based in sorted_indices {
+                                if idx_1based > 0 && idx_1based <= active_positions.len() {
+                                    let pos = active_positions.remove(idx_1based - 1);
+                                    let closing_value = pos.size_btc * precio_actual;
+                                    let closing_fee = closing_value * fee_rate;
+                                    let real_pnl = match pos.position_type {
+                                        PositionType::Long => (precio_actual - pos.entry_price) * pos.size_btc,
+                                        PositionType::Short => (pos.entry_price - precio_actual) * pos.size_btc,
+                                        _ => 0.0,
+                                    };
+                                    let return_value = pos.margin + real_pnl - closing_fee;
+                                    saldo_usdt += return_value;
+                                    println!("💰 POSICIÓN CERRADA PARCIALMENTE: {:?} #{} cerrada a {:.2} USDT (Entrada: {:.2} USDT). Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
+                                        pos.position_type, idx_1based, precio_actual, pos.entry_price, return_value, closing_fee, real_pnl
+                                    );
+                                }
+                            }
+                        }
                         break;
                     } else {
                         println!("⚠️ No se pudo parsear el JSON de Gemma. Reintentando... (Respuesta recibida: {})", content.trim());
@@ -872,6 +954,7 @@ async fn run_backtest(
                         size_btc: pos_size_btc,
                         entry_price: precio_actual,
                         liquidation_price: pos_liq_price,
+                        stop_loss: None,
                     });
                     num_compras += 1;
                     println!("🛒 LONG ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
@@ -919,6 +1002,7 @@ async fn run_backtest(
                         size_btc: pos_size_btc,
                         entry_price: precio_actual,
                         liquidation_price: pos_liq_price,
+                        stop_loss: None,
                     });
                     num_ventas += 1;
                     println!("🛒 SHORT ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
@@ -1502,9 +1586,7 @@ async fn run_live_gemma_step(
     
     // System and User prompt
     let system_prompt = format!(
-        "Eres un agente de trading experto para BTCUSDT en el mercado de futuros de criptomonedas. Tu objetivo es aumentar el valor total de tu cuenta en USDT.\n\
-         Operas en modo de MARGEN AISLADO (Isolated Margin) con apalancamiento {}X. En cada operación utilizas exactamente el 10% de tu saldo disponible total como margen.\n\
-         Cada operación (apertura y cierre) tiene una comisión de transacción del 0.05% sobre el volumen de la posición (Volumen = Margen x Apalancamiento).\n\
+        "Eres un agente de trading experto para BTCUSDT en el mercado de futuros de criptomonedas. Tu objetivo es aumentar el valor total de tu cuenta en USDT.\n          Cada operación (apertura y cierre) tiene una comisión de transacción del 0.05% sobre el volumen de la posición (Volumen = Margen x Apalancamiento).\n\
          \n\
          REGLAS DE OPERATORIA:\n\
          - Si no tienes posición abierta actualmente:\n\
@@ -1520,9 +1602,9 @@ async fn run_live_gemma_step(
          \n\
          Debes responder ESTRICTAMENTE en formato JSON con la siguiente estructura y nada más:\n\
          {{\n\
-           \"analisis\": \"Breve explicación del motivo de tu decisión fundamentada en el análisis de las velas recientes\",\n\
            \"accion\": \"COMPRAR\", \"VENDER\" o \"MANTENER\"\n\
-         }}", leverage, leverage, leverage
+         }}\n\n\
+         No incluyas explicaciones ni análisis adicionales en tu respuesta. Responde únicamente con el objeto JSON.", leverage, leverage
     );
     
     let user_prompt = format!(
@@ -1566,7 +1648,7 @@ async fn run_live_gemma_step(
             Ok(content) => {
                 if let Some(parsed) = parse_gemma_response(&content) {
                     gemma_action = parsed.accion.to_uppercase();
-                    gemma_analisis = parsed.analisis;
+                    gemma_analisis = parsed.analisis.unwrap_or_else(|| "Sin análisis".to_string());
                     break;
                 } else {
                     println!("⚠️ No se pudo parsear el JSON de Gemma. Reintentando... (Respuesta recibida: {})", content.trim());
