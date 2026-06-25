@@ -53,6 +53,7 @@ pub async fn run_backtest(
     leverage: f64,
     risk_percent: f64,
     limit: Option<usize>,
+    confidence_threshold: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let candles = get_candles(db_path, timeframe, limit)?;
     if candles.is_empty() {
@@ -86,19 +87,25 @@ pub async fn run_backtest(
 
     let system_prompt = format!(
         "Bot de trading de futuros BTCUSDT (Margen Aislado {}X, Margen operado: {}% equidad). Comisión: 0.05%.\n\n\
+         CONTEXTO DEL ACTIVO:\n\
+         Bitcoin (BTC) es un activo altamente técnico y fuertemente tendencial. Respeta las estructuras de mercado y los indicadores técnicos clave. Debes centrarte en identificar la tendencia dominante y explotarla.\n\n\
+         OPCIÓN DE QUEDARSE FLAT / MANTENERSE AL MARGEN:\n\
+         Quedarse FLAT (sin operar, eligiendo 'Flat') es una de las decisiones más inteligentes y válidas cuando no hay una dirección clara o cuando hay alta incertidumbre. Si el mercado está en rango lateral, muestra señales contradictorias o volumen bajo, quédate FLAT eligiendo 'Flat'. No sientas la presión de tener que operar en cada vela.\n\n\
+         Si ya tienes una posición abierta (Long o Short) y deseas mantenerla sin abrir nuevas posiciones ni cerrar la actual, debes responder con 'Flat'.\n\n\
          REGLAS ALLIANZ (Riesgo y Posiciones):\n\
          1. NUEVA POSICIÓN: Solo abre otra posición en la misma dirección si alguna posición activa tiene >+200% ROE. No acumules seguidas (All-In).\n\
          2. STOP LOSS (SL): Define o ajusta un SL (ej. para asegurar ganancias). Si el precio lo cruza, la posición se cierra en ese valor.\n\
          3. CIERRES PARCIALES: Cierra posiciones indicando sus índices (1-based) en 'cerrar_posiciones'.\n\n\
-         ACCIONES:\n\
-         - Sin posiciones: 'COMPRAR' (abrir LONG), 'VENDER' (abrir SHORT), 'MANTENER'.\n\
-         - Con LONG: 'Comprar' (abrir otro LONG si ROE > 200%), 'Mantener'.\n\
-         - Con SHORT: 'Vender' (abrir otro SHORT si ROE > 200%), 'Mantener'.\n\n\
+         REGLA DE CONFIANZA:\n\
+         Evalúa tu convicción en el movimiento direccional de 0 a 100.\n\
+         - Si la tendencia es sumamente clara, con soporte técnico y volumen saludable, tu confianza debe ser alta (100).\n\
+         - Si hay dudas, señales contradictorias o el mercado está en rango lateral, tu confianza debe ser baja (0). En este caso, tu respuesta debe inclinarse a quedar FLAT eligiendo 'Flat'.\n\n\
          Responde ESTRICTAMENTE con este JSON y nada más (sin explicaciones):\n\
          {{\n\
-           \"accion\": \"COMPRAR\"|\"VENDER\"|\"MANTENER\",\n\
+           \"accion\": \"Abrir Long\"|\"Cerrar Long\"|\"Flat\"|\"Abrir Short\"|\"Cerrar Short\",\n\
            \"cerrar_posiciones\": [índices_1_based_a_cerrar], // o [] si ninguno\n\
-           \"stop_losses\": [sl_posicion1, null, ...]\n\
+           \"stop_losses\": [sl_posicion1, null, ...],\n\
+           \"confianza\": entero_de_0_a_100\n\
          }}", leverage, risk_percent
     );
 
@@ -204,12 +211,13 @@ pub async fn run_backtest(
 
         // 3. Generar la ventana deslizante
         let mut history_str = String::new();
-        let start_idx = i.saturating_sub(9);
+        let start_idx = i.saturating_sub(29);
+        let actual_history_len = i - start_idx + 1;
         for (idx, prev_candle) in candles[start_idx..=i].iter().enumerate() {
             let label = if start_idx + idx == i { " (Actual)" } else { "" };
             history_str.push_str(&format!(
                 "- t-{}: O:{:.1}, H:{:.1}, L:{:.1}, C:{:.1}, V:{:.0}{}\n",
-                9 - idx, prev_candle.open, prev_candle.high, prev_candle.low, prev_candle.close, prev_candle.volume, label
+                actual_history_len - 1 - idx, prev_candle.open, prev_candle.high, prev_candle.low, prev_candle.close, prev_candle.volume, label
             ));
         }
 
@@ -237,18 +245,17 @@ pub async fn run_backtest(
         }
 
         // Calcular indicadores técnicos para pasárselos a Gemma
-        let (indicador_tendencia, indicador_volatilidad, indicador_posicion, indicador_presion) = 
+        let (indicador_tendencia, indicador_volatilidad, _indicador_posicion, indicador_presion) = 
             calculate_indicators(&candles, start_idx, i, precio_actual);
 
         // 4. Prompt a Gemma
         let user_prompt = format!(
             "Precio actual de BTC (Cierre): {:.2} USDT\n\n\
-             Historial de las últimas 10 velas (de más antigua a más reciente):\n\
+             Historial de las últimas 30 velas (de más antigua a más reciente):\n\
              {}\n\
-             Indicadores Técnicos (Ventana de 10 velas):\n\
+             Indicadores Técnicos (Ventana de 30 velas):\n\
              - Tendencia: {}\n\
              - Volatilidad: {}\n\
-             - Posición del Precio: {}\n\
              - Presión Cuerpo/Volumen: {}\n\n\
              Estado de tu Cartera:\n\
              - Saldo libre en USDT (no en margen): {:.2} USDT\n\
@@ -258,20 +265,33 @@ pub async fn run_backtest(
              - Apalancamiento actual: {:.1}x\n\
              - Comisión por operación: 0.05% sobre el volumen operado\n\n\
              ¿Qué acción tomas? Responde estrictamente en formato JSON.",
-            precio_actual, history_str, indicador_tendencia, indicador_volatilidad, indicador_posicion, indicador_presion, saldo_usdt, positions_str, equity, leverage
+            precio_actual, history_str, indicador_tendencia, indicador_volatilidad, indicador_presion, saldo_usdt, positions_str, equity, leverage
         );
 
         let mut retries = 3;
-        let mut gemma_action = "MANTENER".to_string();
+        let mut gemma_action = "FLAT".to_string();
         let mut gemma_analisis = "Sin análisis".to_string();
+        let mut gemma_confidence = None;
 
         while retries > 0 {
             match call_gemma(&client, &api_url, &api_token, &system_prompt, &user_prompt).await {
                 Ok(content) => {
                     if let Some(parsed) = parse_gemma_response(&content) {
-                        gemma_action = parsed.accion.to_uppercase();
+                        gemma_action = parsed.accion.to_uppercase().replace(" ", "_");
                         if let Some(ref ans) = parsed.analisis {
                             gemma_analisis = ans.clone();
+                        }
+                        gemma_confidence = parsed.confianza;
+
+                        let conf = gemma_confidence.unwrap_or(0);
+                        if confidence_threshold > 0 && conf < confidence_threshold {
+                            if !active_positions.is_empty() {
+                                println!("⚠️ Confianza ({}%) por debajo del umbral ({}%). Iniciando cierre de posiciones activas por seguridad.", conf, confidence_threshold);
+                                gemma_action = "CERRAR_TODO".to_string();
+                            } else if gemma_action != "FLAT" {
+                                println!("⚠️ Gemma sugirió {} con confianza {}%, pero el umbral es {}%. Acción cambiada a FLAT.", gemma_action, conf, confidence_threshold);
+                                gemma_action = "FLAT".to_string();
+                            }
                         }
                         
                         // Apply Stop Loss updates
@@ -336,108 +356,131 @@ pub async fn run_backtest(
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
 
-        println!("🤖 Gemma dice: {}", gemma_analisis);
+        if let Some(conf) = gemma_confidence {
+            if gemma_analisis != "Sin análisis" && !gemma_analisis.trim().is_empty() {
+                println!("🤖 Gemma dice: {} (Confianza: {}%)", gemma_analisis, conf);
+            } else {
+                println!("🤖 Gemma (Confianza: {}%)", conf);
+            }
+        } else {
+            if gemma_analisis != "Sin análisis" && !gemma_analisis.trim().is_empty() {
+                println!("🤖 Gemma dice: {}", gemma_analisis);
+            }
+        }
         println!("📈 Acción elegida: {}", gemma_action);
 
         // 5. Ejecutar la acción elegida
-        if gemma_action == "COMPRAR" {
-            let has_shorts = active_positions.iter().any(|p| p.position_type == PositionType::Short);
-            if has_shorts {
-                // Cerrar todos los SHORTS
-                let mut temp_positions = Vec::new();
-                std::mem::swap(&mut active_positions, &mut temp_positions);
-                for pos in temp_positions {
-                    if pos.position_type == PositionType::Short {
-                        let closing_value = pos.size_btc * precio_actual;
-                        let closing_fee = closing_value * fee_rate;
-                        let real_pnl = (pos.entry_price - precio_actual) * pos.size_btc;
-                        let return_value = pos.margin + real_pnl - closing_fee;
+        if gemma_action == "ABRIR_LONG" {
+            // Abrir nuevo LONG
+            let margin = equity * (risk_percent / 100.0);
+            let size_usdt = margin * leverage;
+            let opening_fee = size_usdt * fee_rate;
 
-                        saldo_usdt += return_value;
-                        println!("💰 SHORT CERRADO: Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
-                            return_value, closing_fee, real_pnl
-                        );
-                    } else {
-                        active_positions.push(pos);
-                    }
-                }
+            if saldo_usdt >= margin + opening_fee {
+                saldo_usdt -= margin + opening_fee;
+                let pos_size_btc = size_usdt / precio_actual;
+                let pos_liq_price = precio_actual * (1.0 - liq_percent / 100.0);
+                active_positions.push(Position {
+                    position_type: PositionType::Long,
+                    margin,
+                    size_btc: pos_size_btc,
+                    entry_price: precio_actual,
+                    liquidation_price: pos_liq_price,
+                    stop_loss: None,
+                });
                 num_compras += 1;
+                println!("🛒 LONG ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
+                    margin, pos_size_btc, size_usdt, pos_liq_price, opening_fee
+                );
             } else {
-                // Abrir nuevo LONG
-                let margin = equity * (risk_percent / 100.0);
-                let size_usdt = margin * leverage;
-                let opening_fee = size_usdt * fee_rate;
+                println!("⏳ Margen/saldo insuficiente para abrir LONG.");
+            }
+        } else if gemma_action == "CERRAR_LONG" {
+            // Cerrar todos los LONGS
+            let mut temp_positions = Vec::new();
+            std::mem::swap(&mut active_positions, &mut temp_positions);
+            for pos in temp_positions {
+                if pos.position_type == PositionType::Long {
+                    let closing_value = pos.size_btc * precio_actual;
+                    let closing_fee = closing_value * fee_rate;
+                    let real_pnl = (precio_actual - pos.entry_price) * pos.size_btc;
+                    let return_value = pos.margin + real_pnl - closing_fee;
 
-                if saldo_usdt >= margin + opening_fee {
-                    saldo_usdt -= margin + opening_fee;
-                    let pos_size_btc = size_usdt / precio_actual;
-                    let pos_liq_price = precio_actual * (1.0 - liq_percent / 100.0);
-                    active_positions.push(Position {
-                        position_type: PositionType::Long,
-                        margin,
-                        size_btc: pos_size_btc,
-                        entry_price: precio_actual,
-                        liquidation_price: pos_liq_price,
-                        stop_loss: None,
-                    });
-                    num_compras += 1;
-                    println!("🛒 LONG ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
-                        margin, pos_size_btc, size_usdt, pos_liq_price, opening_fee
+                    saldo_usdt += return_value;
+                    println!("💰 LONG CERRADO: Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
+                        return_value, closing_fee, real_pnl
                     );
                 } else {
-                    println!("⏳ Margen/saldo insuficiente para abrir LONG.");
+                    active_positions.push(pos);
                 }
             }
-        } else if gemma_action == "VENDER" {
-            let has_longs = active_positions.iter().any(|p| p.position_type == PositionType::Long);
-            if has_longs {
-                // Cerrar todos los LONGS
+            num_ventas += 1;
+        } else if gemma_action == "ABRIR_SHORT" {
+            // Abrir nuevo SHORT
+            let margin = equity * (risk_percent / 100.0);
+            let size_usdt = margin * leverage;
+            let opening_fee = size_usdt * fee_rate;
+
+            if saldo_usdt >= margin + opening_fee {
+                saldo_usdt -= margin + opening_fee;
+                let pos_size_btc = size_usdt / precio_actual;
+                let pos_liq_price = precio_actual * (1.0 + liq_percent / 100.0);
+                active_positions.push(Position {
+                    position_type: PositionType::Short,
+                    margin,
+                    size_btc: pos_size_btc,
+                    entry_price: precio_actual,
+                    liquidation_price: pos_liq_price,
+                    stop_loss: None,
+                });
+                num_ventas += 1;
+                println!("🛒 SHORT ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
+                    margin, pos_size_btc, size_usdt, pos_liq_price, opening_fee
+                );
+            } else {
+                println!("⏳ Margen/saldo insuficiente para abrir SHORT.");
+            }
+        } else if gemma_action == "CERRAR_SHORT" {
+            // Cerrar todos los SHORTS
+            let mut temp_positions = Vec::new();
+            std::mem::swap(&mut active_positions, &mut temp_positions);
+            for pos in temp_positions {
+                if pos.position_type == PositionType::Short {
+                    let closing_value = pos.size_btc * precio_actual;
+                    let closing_fee = closing_value * fee_rate;
+                    let real_pnl = (pos.entry_price - precio_actual) * pos.size_btc;
+                    let return_value = pos.margin + real_pnl - closing_fee;
+
+                    saldo_usdt += return_value;
+                    println!("💰 SHORT CERRADO: Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
+                        return_value, closing_fee, real_pnl
+                    );
+                } else {
+                    active_positions.push(pos);
+                }
+            }
+            num_compras += 1;
+        } else if gemma_action == "CERRAR_TODO" {
+            if !active_positions.is_empty() {
                 let mut temp_positions = Vec::new();
                 std::mem::swap(&mut active_positions, &mut temp_positions);
                 for pos in temp_positions {
-                    if pos.position_type == PositionType::Long {
-                        let closing_value = pos.size_btc * precio_actual;
-                        let closing_fee = closing_value * fee_rate;
-                        let real_pnl = (precio_actual - pos.entry_price) * pos.size_btc;
-                        let return_value = pos.margin + real_pnl - closing_fee;
-
-                        saldo_usdt += return_value;
-                        println!("💰 LONG CERRADO: Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
-                            return_value, closing_fee, real_pnl
-                        );
-                    } else {
-                        active_positions.push(pos);
-                    }
-                }
-                num_ventas += 1;
-            } else {
-                // Abrir nuevo SHORT
-                let margin = equity * (risk_percent / 100.0);
-                let size_usdt = margin * leverage;
-                let opening_fee = size_usdt * fee_rate;
-
-                if saldo_usdt >= margin + opening_fee {
-                    saldo_usdt -= margin + opening_fee;
-                    let pos_size_btc = size_usdt / precio_actual;
-                    let pos_liq_price = precio_actual * (1.0 + liq_percent / 100.0);
-                    active_positions.push(Position {
-                        position_type: PositionType::Short,
-                        margin,
-                        size_btc: pos_size_btc,
-                        entry_price: precio_actual,
-                        liquidation_price: pos_liq_price,
-                        stop_loss: None,
-                    });
-                    num_ventas += 1;
-                    println!("🛒 SHORT ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
-                        margin, pos_size_btc, size_usdt, pos_liq_price, opening_fee
+                    let closing_value = pos.size_btc * precio_actual;
+                    let closing_fee = closing_value * fee_rate;
+                    let real_pnl = match pos.position_type {
+                        PositionType::Long => (precio_actual - pos.entry_price) * pos.size_btc,
+                        PositionType::Short => (pos.entry_price - precio_actual) * pos.size_btc,
+                        _ => 0.0,
+                    };
+                    let return_value = pos.margin + real_pnl - closing_fee;
+                    saldo_usdt += return_value;
+                    println!("💰 POSICIÓN {:?} CERRADA POR SEGURIDAD (CONFIANZA BAJA): Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
+                        pos.position_type, return_value, closing_fee, real_pnl
                     );
-                } else {
-                    println!("⏳ Margen/saldo insuficiente para abrir SHORT.");
                 }
             }
         } else {
-            println!("⏳ Manteniendo posición/Sin acción ejecutada.");
+            println!("⏳ Manteniendo posición/Sin acción ejecutada ({}).", gemma_action);
         }
 
         // Guardar progreso intermedio cada 10 pasos para ver actualización en vivo del dashboard y CSV

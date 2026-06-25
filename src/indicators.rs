@@ -24,18 +24,26 @@ pub fn calculate_indicators(
         "INDETERMINADA (0.00%)".to_string()
     };
 
-    // Indicador 2 — Volatilidad promedio
+    // Indicador 2 — Volatilidad (ATR - Average True Range)
     let indicador_volatilidad = if !slice.is_empty() {
-        let sum_volatilidad: f64 = slice.iter().map(|c| {
-            if c.low > 0.0 {
-                ((c.high - c.low) / c.low) * 100.0
+        let mut sum_tr = 0.0;
+        for idx in start_idx..=i {
+            let tr = if idx > 0 {
+                let prev_close = candles[idx - 1].close;
+                let val1 = candles[idx].high - candles[idx].low;
+                let val2 = (candles[idx].high - prev_close).abs();
+                let val3 = (candles[idx].low - prev_close).abs();
+                val1.max(val2).max(val3)
             } else {
-                0.0
-            }
-        }).sum();
-        format!("{:.2}% promedio por vela", sum_volatilidad / slice_len)
+                candles[idx].high - candles[idx].low
+            };
+            sum_tr += tr;
+        }
+        let atr = sum_tr / slice_len;
+        let atr_pct = if precio_actual > 0.0 { (atr / precio_actual) * 100.0 } else { 0.0 };
+        format!("ATR: {:.2} USDT ({:.2}% del precio actual)", atr, atr_pct)
     } else {
-        "0.00% promedio por vela".to_string()
+        "ATR: 0.00 USDT (0.00% del precio actual)".to_string()
     };
 
     // Indicador 3 — Posición del precio en el rango

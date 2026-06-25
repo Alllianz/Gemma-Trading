@@ -121,7 +121,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, limit).await {
+
+                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, limit, 70).await {
                     println!("❌ Error en el backtest: {}", e);
                 }
             }
@@ -167,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, Some(10)).await {
+                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, Some(10), 70).await {
                     println!("❌ Error en la prueba: {}", e);
                 }
             }

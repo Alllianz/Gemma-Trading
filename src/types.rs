@@ -37,6 +37,8 @@ pub struct GemmaResponse {
     pub cerrar_posiciones: Option<Vec<usize>>,
     #[serde(default)]
     pub stop_losses: Option<Vec<Option<f64>>>,
+    #[serde(default)]
+    pub confianza: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

@@ -20,11 +20,12 @@ pub async fn run_live_gemma_step(
     api_secret: &str,
     leverage: u32,
     use_testnet: bool,
+    confidence_threshold: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Fetch latest 10 candles from DB
-    let candles = get_latest_candles(db_path, timeframe, 10)?;
-    if candles.len() < 10 {
-        return Err("No hay suficientes velas en la base de datos (se requieren al menos 10).".into());
+    // 1. Fetch latest 30 candles from DB
+    let candles = get_latest_candles(db_path, timeframe, 30)?;
+    if candles.len() < 30 {
+        return Err("No hay suficientes velas en la base de datos (se requieren al menos 30).".into());
     }
     
     // 2. Fetch current ticker price
@@ -72,39 +73,49 @@ pub async fn run_live_gemma_step(
     
     // Format candle history for Gemma user prompt
     let mut history_str = String::new();
+    let actual_history_len = candles.len();
     for (idx, prev_candle) in candles.iter().enumerate() {
         let label = if idx == candles.len() - 1 { " (Actual)" } else { "" };
         history_str.push_str(&format!(
             "- t-{}: O:{:.1}, H:{:.1}, L:{:.1}, C:{:.1}, V:{:.0}{}\n",
-            9 - idx, prev_candle.open, prev_candle.high, prev_candle.low, prev_candle.close, prev_candle.volume, label
+            actual_history_len - 1 - idx, prev_candle.open, prev_candle.high, prev_candle.low, prev_candle.close, prev_candle.volume, label
         ));
     }
     
     // System and User prompt
     let system_prompt = format!(
         "Bot de trading de futuros BTCUSDT (Margen Aislado {}X, Margen operado: 10% saldo). Comisión: 0.05%.\n\n\
-         REGLAS:\n\
-         - Sin posiciones: 'COMPRAR' (abrir LONG con 10% saldo), 'VENDER' (abrir SHORT con 10% saldo), 'MANTENER'.\n\
-         - Con LONG: 'VENDER' (cierra LONG a mercado), 'COMPRAR' o 'MANTENER' (mantiene LONG).\n\
-         - Con SHORT: 'COMPRAR' (cierra SHORT a mercado), 'VENDER' o 'MANTENER' (mantiene SHORT).\n\n\
+         CONTEXTO DEL ACTIVO:\n\
+         Bitcoin (BTC) es un activo altamente técnico y fuertemente tendencial. Respeta las estructuras de mercado y los indicadores técnicos clave. Debes centrarte en identificar la tendencia dominante y explotarla.\n\n\
+         OPCIÓN DE QUEDARSE FLAT / MANTENERSE AL MARGEN:\n\
+         Quedarse FLAT (sin operar, eligiendo 'Flat') es una de las decisiones más inteligentes y válidas cuando no hay una dirección clara o cuando hay alta incertidumbre. Si el mercado está en rango lateral, muestra señales contradictorias o volumen bajo, quédate FLAT eligiendo 'Flat'. No sientas la presión de tener que operar en cada vela.\n\n\
+         Si ya tienes una posición abierta (Long o Short) y deseas mantenerla sin abrir nuevas posiciones ni cerrar la actual, debes responder con 'Flat'.\n\n\
+         REGLAS ALLIANZ (Riesgo y Posiciones):\n\
+         1. NUEVA POSICIÓN: Solo abre otra posición en la misma dirección si alguna posición activa tiene >+200% ROE. No acumules seguidas (All-In).\n\
+         2. STOP LOSS (SL): Define o ajusta un SL (ej. para asegurar ganancias). Si el precio lo cruza, la posición se cierra en ese valor.\n\
+         3. CIERRES PARCIALES: Cierra posiciones indicando sus índices (1-based) en 'cerrar_posiciones'.\n\n\
+         REGLA DE CONFIANZA:\n\
+         Evalúa tu convicción en el movimiento direccional de 0 a 100.\n\
+         - Si la tendencia es sumamente clara, con soporte técnico y volumen saludable, tu confianza debe ser alta (100).\n\
+         - Si hay dudas, señales contradictorias o el mercado está en rango lateral, tu confianza debe ser baja (0). En este caso, tu respuesta debe inclinarse a quedar FLAT eligiendo 'Flat'.\n\n\
          Responde ESTRICTAMENTE con este JSON y nada más (sin explicaciones):\n\
          {{\n\
-           \"accion\": \"COMPRAR\"|\"VENDER\"|\"MANTENER\"\n\
+           \"accion\": \"Abrir Long\"|\"Cerrar Long\"|\"Flat\"|\"Abrir Short\"|\"Cerrar Short\",\n\
+           \"confianza\": entero_de_0_a_100\n\
          }}", leverage
     );
     
     // Calcular indicadores técnicos para pasárselos a Gemma
-    let (indicador_tendencia, indicador_volatilidad, indicador_posicion, indicador_presion) = 
+    let (indicador_tendencia, indicador_volatilidad, _indicador_posicion, indicador_presion) = 
         calculate_indicators(&candles, 0, candles.len() - 1, precio_actual);
 
     let user_prompt = format!(
         "Precio actual de BTC (Cierre): {:.2} USDT\n\n\
-         Historial de las últimas 10 velas (de más antigua a más reciente):\n\
+         Historial de las últimas 30 velas (de más antigua a más reciente):\n\
          {}\n\
-         Indicadores Técnicos (Ventana de 10 velas):\n\
+         Indicadores Técnicos (Ventana de 30 velas):\n\
          - Tendencia: {}\n\
          - Volatilidad: {}\n\
-         - Posición del Precio: {}\n\
          - Presión Cuerpo/Volumen: {}\n\n\
          Estado de tu Cartera:\n\
          - Saldo libre en USDT (no en margen): {:.2} USDT\n\
@@ -117,7 +128,7 @@ pub async fn run_live_gemma_step(
          - Equidad total de la cuenta (Equity): {:.2} USDT\n\
          - Comisión por operación: 0.05% sobre el volumen operado\n\n\
          ¿Qué acción tomas? Responde estrictamente en formato JSON.",
-        precio_actual, history_str, indicador_tendencia, indicador_volatilidad, indicador_posicion, indicador_presion, saldo_usdt, position_type, position_margin,
+        precio_actual, history_str, indicador_tendencia, indicador_volatilidad, indicador_presion, saldo_usdt, position_type, position_margin,
         position_size_btc, position_size_btc * precio_actual, precio_entrada, liquidation_price, liq_percent,
         floating_pnl, equity
     );
@@ -134,16 +145,29 @@ pub async fn run_live_gemma_step(
         "http://127.0.0.1:5508/v1/chat/completions".to_string(),
         "lm-studio".to_string()
     ));
-    let mut gemma_action = "MANTENER".to_string();
+    let mut gemma_action = "FLAT".to_string();
     let mut gemma_analisis = "Error al obtener respuesta".to_string();
+    let mut gemma_confidence = None;
     let mut retries = 3;
     
     while retries > 0 {
         match call_gemma(&client, &api_url, &api_token, &system_prompt, &user_prompt).await {
             Ok(content) => {
                 if let Some(parsed) = parse_gemma_response(&content) {
-                    gemma_action = parsed.accion.to_uppercase();
+                    gemma_action = parsed.accion.to_uppercase().replace(" ", "_");
                     gemma_analisis = parsed.analisis.unwrap_or_else(|| "Sin análisis".to_string());
+                    gemma_confidence = parsed.confianza;
+                    
+                    let conf = gemma_confidence.unwrap_or(0);
+                    if confidence_threshold > 0 && conf < confidence_threshold {
+                        if position_type != PositionType::None {
+                            println!("⚠️ Confianza ({}%) por debajo del umbral ({}%). Iniciando cierre de posiciones activas por seguridad.", conf, confidence_threshold);
+                            gemma_action = "CERRAR_TODO".to_string();
+                        } else if gemma_action != "FLAT" {
+                            println!("⚠️ Gemma sugirió {} con confianza {}%, pero el umbral es {}%. Acción cambiada a FLAT.", gemma_action, conf, confidence_threshold);
+                            gemma_action = "FLAT".to_string();
+                        }
+                    }
                     break;
                 } else {
                     println!("⚠️ No se pudo parsear el JSON de Gemma. Reintentando... (Respuesta recibida: {})", content.trim());
@@ -157,11 +181,21 @@ pub async fn run_live_gemma_step(
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     }
     
-    println!("🤖 Gemma dice: {}", gemma_analisis);
+    if let Some(conf) = gemma_confidence {
+        if gemma_analisis != "Sin análisis" && gemma_analisis != "Error al obtener respuesta" && !gemma_analisis.trim().is_empty() {
+            println!("🤖 Gemma dice: {} (Confianza: {}%)", gemma_analisis, conf);
+        } else {
+            println!("🤖 Gemma (Confianza: {}%)", conf);
+        }
+    } else {
+        if gemma_analisis != "Sin análisis" && gemma_analisis != "Error al obtener respuesta" && !gemma_analisis.trim().is_empty() {
+            println!("🤖 Gemma dice: {}", gemma_analisis);
+        }
+    }
     println!("📈 Acción elegida: {}", gemma_action);
     
     // Execute live action
-    if gemma_action == "COMPRAR" {
+    if gemma_action == "ABRIR_LONG" {
         match position_type {
             PositionType::None => {
                 // Open LONG with 10% of equity as margin
@@ -187,19 +221,25 @@ pub async fn run_live_gemma_step(
                     Err(e) => println!("❌ Error abriendo LONG: {}", e),
                 }
             }
-            PositionType::Short => {
-                // Close SHORT
-                println!("💰 Cerrando SHORT de {:.4} BTC...", position_size_btc);
-                match open_market_order(client, api_key, api_secret, "BTC-USDT", "BUY", "SHORT", position_size_btc, None, use_testnet).await {
-                    Ok(_) => println!("✅ SHORT CERRADO EXITOSAMENTE EN BINGX."),
-                    Err(e) => println!("❌ Error cerrando SHORT: {}", e),
-                }
-            }
-            PositionType::Long => {
-                println!("⏳ Ya tienes una posición LONG activa. Manteniendo...");
+            _ => {
+                println!("⏳ Acción ABRIR_LONG recibida, pero ya tienes una posición activa ({:?}). Manteniendo...", position_type);
             }
         }
-    } else if gemma_action == "VENDER" {
+    } else if gemma_action == "CERRAR_LONG" {
+        match position_type {
+            PositionType::Long => {
+                // Close LONG
+                println!("💰 Cerrando LONG de {:.4} BTC...", position_size_btc);
+                match open_market_order(client, api_key, api_secret, "BTC-USDT", "SELL", "LONG", position_size_btc, None, use_testnet).await {
+                    Ok(_) => println!("✅ LONG CERRADO EXITOSAMENTE EN BINGX."),
+                    Err(e) => println!("❌ Error cerrando LONG: {}", e),
+                }
+            }
+            _ => {
+                println!("⏳ Acción CERRAR_LONG recibida, pero no tienes ninguna posición LONG activa (Posición actual: {:?}).", position_type);
+            }
+        }
+    } else if gemma_action == "ABRIR_SHORT" {
         match position_type {
             PositionType::None => {
                 // Open SHORT with 10% of equity as margin
@@ -225,20 +265,46 @@ pub async fn run_live_gemma_step(
                     Err(e) => println!("❌ Error abriendo SHORT: {}", e),
                 }
             }
+            _ => {
+                println!("⏳ Acción ABRIR_SHORT recibida, pero ya tienes una posición activa ({:?}). Manteniendo...", position_type);
+            }
+        }
+    } else if gemma_action == "CERRAR_SHORT" {
+        match position_type {
+            PositionType::Short => {
+                // Close SHORT
+                println!("💰 Cerrando SHORT de {:.4} BTC...", position_size_btc);
+                match open_market_order(client, api_key, api_secret, "BTC-USDT", "BUY", "SHORT", position_size_btc, None, use_testnet).await {
+                    Ok(_) => println!("✅ SHORT CERRADO EXITOSAMENTE EN BINGX."),
+                    Err(e) => println!("❌ Error cerrando SHORT: {}", e),
+                }
+            }
+            _ => {
+                println!("⏳ Acción CERRAR_SHORT recibida, pero no tienes ninguna posición SHORT activa (Posición actual: {:?}).", position_type);
+            }
+        }
+    } else if gemma_action == "CERRAR_TODO" {
+        match position_type {
             PositionType::Long => {
-                // Close LONG
-                println!("💰 Cerrando LONG de {:.4} BTC...", position_size_btc);
+                println!("💰 Cerrando LONG de {:.4} BTC por seguridad (confianza por debajo del umbral)...", position_size_btc);
                 match open_market_order(client, api_key, api_secret, "BTC-USDT", "SELL", "LONG", position_size_btc, None, use_testnet).await {
                     Ok(_) => println!("✅ LONG CERRADO EXITOSAMENTE EN BINGX."),
                     Err(e) => println!("❌ Error cerrando LONG: {}", e),
                 }
             }
             PositionType::Short => {
-                println!("⏳ Ya tienes una posición SHORT activa. Manteniendo...");
+                println!("💰 Cerrando SHORT de {:.4} BTC por seguridad (confianza por debajo del umbral)...", position_size_btc);
+                match open_market_order(client, api_key, api_secret, "BTC-USDT", "BUY", "SHORT", position_size_btc, None, use_testnet).await {
+                    Ok(_) => println!("✅ SHORT CERRADO EXITOSAMENTE EN BINGX."),
+                    Err(e) => println!("❌ Error cerrando SHORT: {}", e),
+                }
+            }
+            PositionType::None => {
+                println!("⏳ No hay posiciones activas para cerrar.");
             }
         }
     } else {
-        println!("⏳ Manteniendo posición/Sin acción ejecutada.");
+        println!("⏳ Manteniendo posición/Sin acción ejecutada ({}).", gemma_action);
     }
     
     Ok(())
@@ -518,7 +584,7 @@ pub async fn trading_en_vivo_menu(db_path: &str, client: &reqwest::Client) -> Re
                                     
                                     // Run one live step
                                     println!("🧠 Evaluando mercado con Gemma ({})...", timeframe);
-                                    if let Err(e) = run_live_gemma_step(db_path, timeframe, client, &api_key, &api_secret, leverage, use_testnet).await {
+                                    if let Err(e) = run_live_gemma_step(db_path, timeframe, client, &api_key, &api_secret, leverage, use_testnet, 70).await {
                                         println!("⚠️ Error en el paso de trading: {}", e);
                                     }
                                     
