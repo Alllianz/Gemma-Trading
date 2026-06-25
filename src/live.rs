@@ -22,10 +22,10 @@ pub async fn run_live_gemma_step(
     use_testnet: bool,
     confidence_threshold: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Fetch latest 30 candles from DB
-    let candles = get_latest_candles(db_path, timeframe, 30)?;
-    if candles.len() < 30 {
-        return Err("No hay suficientes velas en la base de datos (se requieren al menos 30).".into());
+    // 1. Fetch latest 10 candles from DB
+    let candles = get_latest_candles(db_path, timeframe, 10)?;
+    if candles.len() < 10 {
+        return Err("No hay suficientes velas en la base de datos (se requieren al menos 10).".into());
     }
     
     // 2. Fetch current ticker price
@@ -111,9 +111,9 @@ pub async fn run_live_gemma_step(
 
     let user_prompt = format!(
         "Precio actual de BTC (Cierre): {:.2} USDT\n\n\
-         Historial de las últimas 30 velas (de más antigua a más reciente):\n\
+         Historial de las últimas 10 velas (de más antigua a más reciente):\n\
          {}\n\
-         Indicadores Técnicos (Ventana de 30 velas):\n\
+         Indicadores Técnicos (Ventana de 10 velas):\n\
          - Tendencia: {}\n\
          - Volatilidad: {}\n\
          - Presión Cuerpo/Volumen: {}\n\n\
@@ -151,8 +151,15 @@ pub async fn run_live_gemma_step(
     let mut retries = 3;
     
     while retries > 0 {
+        println!("\n=== [ENVÍO A GEMMA] ===");
+        println!("System Prompt:\n{}", system_prompt);
+        println!("User Prompt:\n{}", user_prompt);
+        println!("=======================");
         match call_gemma(&client, &api_url, &api_token, &system_prompt, &user_prompt).await {
             Ok(content) => {
+                println!("\n=== [RESPUESTA DE GEMMA] ===");
+                println!("{}", content.trim());
+                println!("============================");
                 if let Some(parsed) = parse_gemma_response(&content) {
                     gemma_action = parsed.accion.to_uppercase().replace(" ", "_");
                     gemma_analisis = parsed.analisis.unwrap_or_else(|| "Sin análisis".to_string());

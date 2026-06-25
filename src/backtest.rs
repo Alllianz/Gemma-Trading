@@ -211,7 +211,7 @@ pub async fn run_backtest(
 
         // 3. Generar la ventana deslizante
         let mut history_str = String::new();
-        let start_idx = i.saturating_sub(29);
+        let start_idx = i.saturating_sub(9);
         let actual_history_len = i - start_idx + 1;
         for (idx, prev_candle) in candles[start_idx..=i].iter().enumerate() {
             let label = if start_idx + idx == i { " (Actual)" } else { "" };
@@ -251,9 +251,9 @@ pub async fn run_backtest(
         // 4. Prompt a Gemma
         let user_prompt = format!(
             "Precio actual de BTC (Cierre): {:.2} USDT\n\n\
-             Historial de las últimas 30 velas (de más antigua a más reciente):\n\
+             Historial de las últimas 10 velas (de más antigua a más reciente):\n\
              {}\n\
-             Indicadores Técnicos (Ventana de 30 velas):\n\
+             Indicadores Técnicos (Ventana de 10 velas):\n\
              - Tendencia: {}\n\
              - Volatilidad: {}\n\
              - Presión Cuerpo/Volumen: {}\n\n\
@@ -274,8 +274,15 @@ pub async fn run_backtest(
         let mut gemma_confidence = None;
 
         while retries > 0 {
+            println!("\n=== [ENVÍO A GEMMA] ===");
+            println!("System Prompt:\n{}", system_prompt);
+            println!("User Prompt:\n{}", user_prompt);
+            println!("=======================");
             match call_gemma(&client, &api_url, &api_token, &system_prompt, &user_prompt).await {
                 Ok(content) => {
+                    println!("\n=== [RESPUESTA DE GEMMA] ===");
+                    println!("{}", content.trim());
+                    println!("============================");
                     if let Some(parsed) = parse_gemma_response(&content) {
                         gemma_action = parsed.accion.to_uppercase().replace(" ", "_");
                         if let Some(ref ans) = parsed.analisis {

@@ -15,13 +15,12 @@ pub fn calculate_indicators(
         let last_close = slice[slice.len() - 1].close;
         if first_close > 0.0 {
             let var_pct = ((last_close - first_close) / first_close) * 100.0;
-            let direction = if var_pct >= 0.0 { "ALCISTA" } else { "BAJISTA" };
-            format!("{} ({:+.2}%)", direction, var_pct)
+            format!("{:+.2}%", var_pct)
         } else {
-            "INDETERMINADA (0.00%)".to_string()
+            "0.00%".to_string()
         }
     } else {
-        "INDETERMINADA (0.00%)".to_string()
+        "0.00%".to_string()
     };
 
     // Indicador 2 — Volatilidad (ATR - Average True Range)
@@ -41,9 +40,9 @@ pub fn calculate_indicators(
         }
         let atr = sum_tr / slice_len;
         let atr_pct = if precio_actual > 0.0 { (atr / precio_actual) * 100.0 } else { 0.0 };
-        format!("ATR: {:.2} USDT ({:.2}% del precio actual)", atr, atr_pct)
+        format!("{:.2}%", atr_pct)
     } else {
-        "ATR: 0.00 USDT (0.00% del precio actual)".to_string()
+        "0.00%".to_string()
     };
 
     // Indicador 3 — Posición del precio en el rango
@@ -69,9 +68,9 @@ pub fn calculate_indicators(
                 0.0
             }
         }).sum();
-        format!("{:.6} (alto=presión direccional, bajo=absorción/indecisión)", sum_ratio / slice_len)
+        format!("{:.6}", sum_ratio / slice_len)
     } else {
-        "0.000000 (alto=presión direccional, bajo=absorción/indecisión)".to_string()
+        "0.000000".to_string()
     };
 
     (indicador_tendencia, indicador_volatilidad, indicador_posicion, indicador_presion)
