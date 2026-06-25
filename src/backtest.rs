@@ -54,6 +54,7 @@ pub async fn run_backtest(
     risk_percent: f64,
     limit: Option<usize>,
     confidence_threshold: u32,
+    verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let candles = get_candles(db_path, timeframe, limit)?;
     if candles.is_empty() {
@@ -81,6 +82,7 @@ pub async fn run_backtest(
     let mut equity_curve = Vec::new();
     let initial_price = candles.first().map(|c| c.close).unwrap_or(1.0);
     let initial_balance = 10000.0;
+    let mut trade_pnls: Vec<f64> = Vec::new();
 
     // El umbral de liquidación según la fórmula
     let liq_percent = get_liquidation_percentage(leverage);
@@ -120,11 +122,12 @@ pub async fn run_backtest(
 
         let precio_actual = candle.close;
 
-        // 1. Verificar si hay liquidación o ejecución de SL en esta vela (usando high/low)
+        // 1. Verificar si hay liquidación o ejecución de SL/TP en esta vela (usando high/low)
         let mut closed_indices = Vec::new();
         for (idx, pos) in active_positions.iter().enumerate() {
             let mut liquidado = false;
             let mut hit_sl = false;
+            let mut hit_tp = false;
             match pos.position_type {
                 PositionType::Long => {
                     if candle.low <= pos.liquidation_price {
@@ -132,6 +135,10 @@ pub async fn run_backtest(
                     } else if let Some(sl) = pos.stop_loss {
                         if candle.low <= sl {
                             hit_sl = true;
+                        }
+                    } else if let Some(tp) = pos.take_profit {
+                        if candle.high >= tp {
+                            hit_tp = true;
                         }
                     }
                 }
@@ -142,26 +149,35 @@ pub async fn run_backtest(
                         if candle.high >= sl {
                             hit_sl = true;
                         }
+                    } else if let Some(tp) = pos.take_profit {
+                        if candle.low <= tp {
+                            hit_tp = true;
+                        }
                     }
                 }
                 _ => {}
             }
             if liquidado {
-                closed_indices.push((idx, true, pos.liquidation_price));
+                closed_indices.push((idx, 0, pos.liquidation_price)); // 0: Liq, 1: SL, 2: TP
             } else if hit_sl {
-                closed_indices.push((idx, false, pos.stop_loss.unwrap()));
+                closed_indices.push((idx, 1, pos.stop_loss.unwrap()));
+            } else if hit_tp {
+                closed_indices.push((idx, 2, pos.take_profit.unwrap()));
             }
         }
 
         // Process closures from last to first
         closed_indices.reverse();
-        for (idx, is_liq, exit_price) in closed_indices {
+        for (idx, close_type, exit_price) in closed_indices {
             let pos = active_positions.remove(idx);
-            if is_liq {
+            let opening_fee = pos.size_btc * pos.entry_price * fee_rate;
+            if close_type == 0 {
                 println!("🔥 LIQUIDACIÓN DETECTADA: La posición {:?} fue liquidada al tocar el precio de {:.2} USDT (Entrada: {:.2} USDT). Se perdió el margen de {:.2} USDT.",
                     pos.position_type, pos.liquidation_price, pos.entry_price, pos.margin
                 );
                 num_liquidaciones += 1;
+                let net_pnl = -pos.margin - opening_fee;
+                trade_pnls.push(net_pnl);
             } else {
                 let closing_value = pos.size_btc * exit_price;
                 let closing_fee = closing_value * fee_rate;
@@ -172,9 +188,17 @@ pub async fn run_backtest(
                 };
                 let return_value = pos.margin + real_pnl - closing_fee;
                 saldo_usdt += return_value;
-                println!("🛑 STOP LOSS EJECUTADO: Posición {:?} cerrada a {:.2} USDT (Entrada: {:.2} USDT). Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
-                    pos.position_type, exit_price, pos.entry_price, return_value, closing_fee, real_pnl
-                );
+                let net_pnl = real_pnl - opening_fee - closing_fee;
+                trade_pnls.push(net_pnl);
+                if close_type == 1 {
+                    println!("🛑 STOP LOSS EJECUTADO: Posición {:?} cerrada a {:.2} USDT (Entrada: {:.2} USDT). Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
+                        pos.position_type, exit_price, pos.entry_price, return_value, closing_fee, real_pnl
+                    );
+                } else {
+                    println!("🎯 TAKE PROFIT EJECUTADO: Posición {:?} cerrada a {:.2} USDT (Entrada: {:.2} USDT). Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
+                        pos.position_type, exit_price, pos.entry_price, return_value, closing_fee, real_pnl
+                    );
+                }
             }
         }
 
@@ -237,26 +261,37 @@ pub async fn run_backtest(
                     Some(sl) => format!("{:.2} USDT", sl),
                     None => "Ninguno".to_string(),
                 };
+                let tp_str = match pos.take_profit {
+                    Some(tp) => format!("{:.2} USDT", tp),
+                    None => "Ninguno".to_string(),
+                };
                 positions_str.push_str(&format!(
-                    "- Posición #{}: {:?} | Entrada: {:.2} USDT | Margen: {:.2} USDT | Tamaño: {:.6} BTC | Liq: {:.2} USDT | SL: {} | PnL Flotante: {:.2} USDT (ROE: {:.2}%)\n",
-                    idx + 1, pos.position_type, pos.entry_price, pos.margin, pos.size_btc, pos.liquidation_price, sl_str, pnl, roe
+                    "- Posición #{}: {:?} | Entrada: {:.2} USDT | Margen: {:.2} USDT | Tamaño: {:.6} BTC | Liq: {:.2} USDT | SL: {} | TP: {} | PnL Flotante: {:.2} USDT (ROE: {:.2}%)\n",
+                    idx + 1, pos.position_type, pos.entry_price, pos.margin, pos.size_btc, pos.liquidation_price, sl_str, tp_str, pnl, roe
                 ));
             }
         }
 
-        // Calcular indicadores técnicos para pasárselos a Gemma
-        let (indicador_tendencia, indicador_volatilidad, _indicador_posicion, indicador_presion) = 
-            calculate_indicators(&candles, start_idx, i, precio_actual);
+        // Calcular la progresión de los indicadores técnicos para pasárselos a Gemma
+        let mut indicators_str = String::new();
+        for idx in start_idx..=i {
+            let win_start = idx.saturating_sub(9);
+            let (tend, vol, _, pres) = calculate_indicators(&candles, win_start, idx, candles[idx].close);
+            let label = if idx == i { " (Actual)" } else { "" };
+            let offset = i - idx;
+            indicators_str.push_str(&format!(
+                "- t-{}: Tendencia: {}, Volatilidad: {}, Presión Cuerpo/Volumen: {}{}\n",
+                offset, tend, vol, pres, label
+            ));
+        }
 
         // 4. Prompt a Gemma
         let user_prompt = format!(
             "Precio actual de BTC (Cierre): {:.2} USDT\n\n\
              Historial de las últimas 10 velas (de más antigua a más reciente):\n\
              {}\n\
-             Indicadores Técnicos (Ventana de 10 velas):\n\
-             - Tendencia: {}\n\
-             - Volatilidad: {}\n\
-             - Presión Cuerpo/Volumen: {}\n\n\
+             Indicadores Técnicos (Ventana de 10 velas, de más antigua a más reciente):\n\
+             {}\n\
              Estado de tu Cartera:\n\
              - Saldo libre en USDT (no en margen): {:.2} USDT\n\
              - Posiciones Activas:\n\
@@ -265,7 +300,7 @@ pub async fn run_backtest(
              - Apalancamiento actual: {:.1}x\n\
              - Comisión por operación: 0.05% sobre el volumen operado\n\n\
              ¿Qué acción tomas? Responde estrictamente en formato JSON.",
-            precio_actual, history_str, indicador_tendencia, indicador_volatilidad, indicador_presion, saldo_usdt, positions_str, equity, leverage
+            precio_actual, history_str, indicators_str, saldo_usdt, positions_str, equity, leverage
         );
 
         let mut retries = 3;
@@ -274,15 +309,19 @@ pub async fn run_backtest(
         let mut gemma_confidence = None;
 
         while retries > 0 {
-            println!("\n=== [ENVÍO A GEMMA] ===");
-            println!("System Prompt:\n{}", system_prompt);
-            println!("User Prompt:\n{}", user_prompt);
-            println!("=======================");
+            if verbose {
+                println!("\n=== [ENVÍO A GEMMA] ===");
+                println!("System Prompt:\n{}", system_prompt);
+                println!("User Prompt:\n{}", user_prompt);
+                println!("=======================");
+            }
             match call_gemma(&client, &api_url, &api_token, &system_prompt, &user_prompt).await {
                 Ok(content) => {
-                    println!("\n=== [RESPUESTA DE GEMMA] ===");
-                    println!("{}", content.trim());
-                    println!("============================");
+                    if verbose {
+                        println!("\n=== [RESPUESTA DE GEMMA] ===");
+                        println!("{}", content.trim());
+                        println!("============================");
+                    }
                     if let Some(parsed) = parse_gemma_response(&content) {
                         gemma_action = parsed.accion.to_uppercase().replace(" ", "_");
                         if let Some(ref ans) = parsed.analisis {
@@ -311,6 +350,16 @@ pub async fn run_backtest(
                             }
                         }
 
+                        // Apply Take Profit updates
+                        if let Some(ref tps) = parsed.take_profits {
+                            for (idx, tp_val) in tps.iter().enumerate() {
+                                if idx < active_positions.len() {
+                                    active_positions[idx].take_profit = *tp_val;
+                                    println!("⚙️ TAKE PROFIT ACTUALIZADO: Posición #{} -> {:?}", idx + 1, tp_val);
+                                }
+                            }
+                        }
+
                         // Apply partial closures
                         if let Some(ref indices_to_close) = parsed.cerrar_posiciones {
                             let mut sorted_indices = indices_to_close.clone();
@@ -320,6 +369,7 @@ pub async fn run_backtest(
                                     let pos = active_positions.remove(idx_1based - 1);
                                     let closing_value = pos.size_btc * precio_actual;
                                     let closing_fee = closing_value * fee_rate;
+                                    let opening_fee = pos.size_btc * pos.entry_price * fee_rate;
                                     let real_pnl = match pos.position_type {
                                         PositionType::Long => (precio_actual - pos.entry_price) * pos.size_btc,
                                         PositionType::Short => (pos.entry_price - precio_actual) * pos.size_btc,
@@ -327,6 +377,8 @@ pub async fn run_backtest(
                                     };
                                     let return_value = pos.margin + real_pnl - closing_fee;
                                     saldo_usdt += return_value;
+                                    let net_pnl = real_pnl - opening_fee - closing_fee;
+                                    trade_pnls.push(net_pnl);
                                     println!("💰 POSICIÓN CERRADA PARCIALMENTE: {:?} #{} cerrada a {:.2} USDT (Entrada: {:.2} USDT). Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
                                         pos.position_type, idx_1based, precio_actual, pos.entry_price, return_value, closing_fee, real_pnl
                                     );
@@ -394,6 +446,7 @@ pub async fn run_backtest(
                     entry_price: precio_actual,
                     liquidation_price: pos_liq_price,
                     stop_loss: None,
+                    take_profit: None,
                 });
                 num_compras += 1;
                 println!("🛒 LONG ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
@@ -410,10 +463,13 @@ pub async fn run_backtest(
                 if pos.position_type == PositionType::Long {
                     let closing_value = pos.size_btc * precio_actual;
                     let closing_fee = closing_value * fee_rate;
+                    let opening_fee = pos.size_btc * pos.entry_price * fee_rate;
                     let real_pnl = (precio_actual - pos.entry_price) * pos.size_btc;
                     let return_value = pos.margin + real_pnl - closing_fee;
 
                     saldo_usdt += return_value;
+                    let net_pnl = real_pnl - opening_fee - closing_fee;
+                    trade_pnls.push(net_pnl);
                     println!("💰 LONG CERRADO: Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
                         return_value, closing_fee, real_pnl
                     );
@@ -439,6 +495,7 @@ pub async fn run_backtest(
                     entry_price: precio_actual,
                     liquidation_price: pos_liq_price,
                     stop_loss: None,
+                    take_profit: None,
                 });
                 num_ventas += 1;
                 println!("🛒 SHORT ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
@@ -455,10 +512,13 @@ pub async fn run_backtest(
                 if pos.position_type == PositionType::Short {
                     let closing_value = pos.size_btc * precio_actual;
                     let closing_fee = closing_value * fee_rate;
+                    let opening_fee = pos.size_btc * pos.entry_price * fee_rate;
                     let real_pnl = (pos.entry_price - precio_actual) * pos.size_btc;
                     let return_value = pos.margin + real_pnl - closing_fee;
 
                     saldo_usdt += return_value;
+                    let net_pnl = real_pnl - opening_fee - closing_fee;
+                    trade_pnls.push(net_pnl);
                     println!("💰 SHORT CERRADO: Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
                         return_value, closing_fee, real_pnl
                     );
@@ -474,6 +534,7 @@ pub async fn run_backtest(
                 for pos in temp_positions {
                     let closing_value = pos.size_btc * precio_actual;
                     let closing_fee = closing_value * fee_rate;
+                    let opening_fee = pos.size_btc * pos.entry_price * fee_rate;
                     let real_pnl = match pos.position_type {
                         PositionType::Long => (precio_actual - pos.entry_price) * pos.size_btc,
                         PositionType::Short => (pos.entry_price - precio_actual) * pos.size_btc,
@@ -481,6 +542,8 @@ pub async fn run_backtest(
                     };
                     let return_value = pos.margin + real_pnl - closing_fee;
                     saldo_usdt += return_value;
+                    let net_pnl = real_pnl - opening_fee - closing_fee;
+                    trade_pnls.push(net_pnl);
                     println!("💰 POSICIÓN {:?} CERRADA POR SEGURIDAD (CONFIANZA BAJA): Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
                         pos.position_type, return_value, closing_fee, real_pnl
                     );
@@ -496,7 +559,104 @@ pub async fn run_backtest(
             let bh_equity_series: Vec<f64> = equity_curve.iter().map(|(_, _, bh)| *bh).collect();
             let temp_correlation = calculate_correlation(&bot_equity_series, &bh_equity_series);
             let _ = save_equity_curve(&equity_curve, "equity_curve.csv");
-            let _ = generate_dashboard(&equity_curve, num_compras, num_ventas, num_liquidaciones, max_drawdown, temp_correlation, "dashboard.html");
+            
+            // Calc temp advanced metrics
+            let total_closed_trades = trade_pnls.len();
+            let wins: Vec<f64> = trade_pnls.iter().cloned().filter(|&p| p > 0.0).collect();
+            let losses: Vec<f64> = trade_pnls.iter().cloned().filter(|&p| p <= 0.0).collect();
+            let temp_winrate = if total_closed_trades > 0 {
+                (wins.len() as f64 / total_closed_trades as f64) * 100.0
+            } else {
+                0.0
+            };
+            let gross_profit: f64 = wins.iter().sum();
+            let gross_loss: f64 = losses.iter().sum::<f64>().abs();
+            let temp_profit_factor = if gross_loss > 0.0 {
+                gross_profit / gross_loss
+            } else if gross_profit > 0.0 {
+                99.9
+            } else {
+                0.0
+            };
+
+            let mut temp_max_dd_usd = 0.0;
+            let mut temp_peak_eq_usd = initial_balance;
+            for (_, eq, _) in &equity_curve {
+                if *eq > temp_peak_eq_usd {
+                    temp_peak_eq_usd = *eq;
+                }
+                let dd_usd = temp_peak_eq_usd - *eq;
+                if dd_usd > temp_max_dd_usd {
+                    temp_max_dd_usd = dd_usd;
+                }
+            }
+            let current_eq = equity_curve.last().map(|(_, eq, _)| *eq).unwrap_or(initial_balance);
+            let temp_recovery_factor = if temp_max_dd_usd > 0.0 {
+                (current_eq - initial_balance) / temp_max_dd_usd
+            } else {
+                0.0
+            };
+
+            let returns: Vec<f64> = equity_curve.windows(2).map(|w| (w[1].1 - w[0].1) / w[0].1).collect();
+            let temp_sharpe = if returns.len() > 1 {
+                let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+                let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (returns.len() - 1) as f64;
+                let std_dev = variance.sqrt();
+                if std_dev > 0.0 {
+                    let step_sharpe = mean / std_dev;
+                    let annualization_factor = match timeframe {
+                        "1h" => (24.0 * 365.0f64).sqrt(),
+                        "4h" => (6.0 * 365.0f64).sqrt(),
+                        "1d" => 365.0f64.sqrt(),
+                        _ => 1.0,
+                    };
+                    step_sharpe * annualization_factor
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+
+            let mut max_eq_stag = initial_balance;
+            let mut current_stagnation = 0;
+            let mut stagnation_periods = Vec::new();
+            for (_, eq, _) in &equity_curve {
+                if *eq >= max_eq_stag {
+                    if current_stagnation > 0 {
+                        stagnation_periods.push(current_stagnation);
+                        current_stagnation = 0;
+                    }
+                    max_eq_stag = *eq;
+                } else {
+                    current_stagnation += 1;
+                }
+            }
+            if current_stagnation > 0 {
+                stagnation_periods.push(current_stagnation);
+            }
+            let temp_max_stagnation = stagnation_periods.iter().max().copied().unwrap_or(0);
+            let temp_avg_stagnation = if !stagnation_periods.is_empty() {
+                stagnation_periods.iter().sum::<usize>() as f64 / stagnation_periods.len() as f64
+            } else {
+                0.0
+            };
+
+            let _ = generate_dashboard(
+                &equity_curve,
+                num_compras,
+                num_ventas,
+                num_liquidaciones,
+                max_drawdown,
+                temp_correlation,
+                temp_winrate,
+                temp_profit_factor,
+                temp_sharpe,
+                temp_recovery_factor,
+                temp_avg_stagnation,
+                temp_max_stagnation,
+                "dashboard.html"
+            );
         }
 
         // Wait a bit to avoid overloading LM Studio or too fast output
@@ -507,11 +667,16 @@ pub async fn run_backtest(
     let mut final_floating_pnl = 0.0;
     let mut final_margins = 0.0;
     for pos in &active_positions {
+        let closing_value = pos.size_btc * candles.last().unwrap().close;
+        let closing_fee = closing_value * fee_rate;
+        let opening_fee = pos.size_btc * pos.entry_price * fee_rate;
         let pnl = match pos.position_type {
             PositionType::Long => (candles.last().unwrap().close - pos.entry_price) * pos.size_btc,
             PositionType::Short => (pos.entry_price - candles.last().unwrap().close) * pos.size_btc,
             _ => 0.0,
         };
+        let net_pnl = pnl - opening_fee - closing_fee;
+        trade_pnls.push(net_pnl);
         final_floating_pnl += pnl;
         final_margins += pos.margin;
     }
@@ -525,9 +690,111 @@ pub async fn run_backtest(
     let correlation = calculate_correlation(&bot_equity_series, &bh_equity_series);
     println!("📈 Correlación con Buy & Hold: {:.4}", correlation);
 
+    // Calc final metrics
+    let total_closed_trades = trade_pnls.len();
+    let wins: Vec<f64> = trade_pnls.iter().cloned().filter(|&p| p > 0.0).collect();
+    let losses: Vec<f64> = trade_pnls.iter().cloned().filter(|&p| p <= 0.0).collect();
+    let final_winrate = if total_closed_trades > 0 {
+        (wins.len() as f64 / total_closed_trades as f64) * 100.0
+    } else {
+        0.0
+    };
+    let gross_profit: f64 = wins.iter().sum();
+    let gross_loss: f64 = losses.iter().sum::<f64>().abs();
+    let final_profit_factor = if gross_loss > 0.0 {
+        gross_profit / gross_loss
+    } else if gross_profit > 0.0 {
+        99.9
+    } else {
+        0.0
+    };
+
+    let mut final_max_dd_usd = 0.0;
+    let mut final_peak_eq_usd = initial_balance;
+    for (_, eq, _) in &equity_curve {
+        if *eq > final_peak_eq_usd {
+            final_peak_eq_usd = *eq;
+        }
+        let dd_usd = final_peak_eq_usd - *eq;
+        if dd_usd > final_max_dd_usd {
+            final_max_dd_usd = dd_usd;
+        }
+    }
+    let final_recovery_factor = if final_max_dd_usd > 0.0 {
+        (final_equity - initial_balance) / final_max_dd_usd
+    } else {
+        0.0
+    };
+
+    let returns: Vec<f64> = equity_curve.windows(2).map(|w| (w[1].1 - w[0].1) / w[0].1).collect();
+    let final_sharpe = if returns.len() > 1 {
+        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+        let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (returns.len() - 1) as f64;
+        let std_dev = variance.sqrt();
+        if std_dev > 0.0 {
+            let step_sharpe = mean / std_dev;
+            let annualization_factor = match timeframe {
+                "1h" => (24.0 * 365.0f64).sqrt(),
+                "4h" => (6.0 * 365.0f64).sqrt(),
+                "1d" => 365.0f64.sqrt(),
+                _ => 1.0,
+            };
+            step_sharpe * annualization_factor
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    let mut max_eq_stag = initial_balance;
+    let mut current_stagnation = 0;
+    let mut stagnation_periods = Vec::new();
+    for (_, eq, _) in &equity_curve {
+        if *eq >= max_eq_stag {
+            if current_stagnation > 0 {
+                stagnation_periods.push(current_stagnation);
+                current_stagnation = 0;
+            }
+            max_eq_stag = *eq;
+        } else {
+            current_stagnation += 1;
+        }
+    }
+    if current_stagnation > 0 {
+        stagnation_periods.push(current_stagnation);
+    }
+    let final_max_stagnation = stagnation_periods.iter().max().copied().unwrap_or(0);
+    let final_avg_stagnation = if !stagnation_periods.is_empty() {
+        stagnation_periods.iter().sum::<usize>() as f64 / stagnation_periods.len() as f64
+    } else {
+        0.0
+    };
+
+    println!("📈 Winrate: {:.2}% ({} / {})", final_winrate, wins.len(), total_closed_trades);
+    println!("📈 Profit Factor: {:.2}", final_profit_factor);
+    println!("📈 Sharpe Ratio: {:.2}", final_sharpe);
+    println!("📈 Recovery Factor: {:.2}", final_recovery_factor);
+    println!("📈 Stagnation: Max {} velas, Promedio {:.2} velas", final_max_stagnation, final_avg_stagnation);
+
     save_equity_curve(&equity_curve, "equity_curve.csv")?;
     println!("📊 Curva de equidad guardada en 'equity_curve.csv'");
-    generate_dashboard(&equity_curve, num_compras, num_ventas, num_liquidaciones, max_drawdown, correlation, "dashboard.html")?;
+    
+    generate_dashboard(
+        &equity_curve,
+        num_compras,
+        num_ventas,
+        num_liquidaciones,
+        max_drawdown,
+        correlation,
+        final_winrate,
+        final_profit_factor,
+        final_sharpe,
+        final_recovery_factor,
+        final_avg_stagnation,
+        final_max_stagnation,
+        "dashboard.html"
+    )?;
     println!("🖥️ Dashboard interactivo guardado en 'dashboard.html'");
 
     Ok(())

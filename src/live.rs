@@ -86,37 +86,50 @@ pub async fn run_live_gemma_step(
     let system_prompt = format!(
         "Bot de trading de futuros BTCUSDT (Margen Aislado {}X, Margen operado: 10% saldo). Comisión: 0.05%.\n\n\
          CONTEXTO DEL ACTIVO:\n\
-         Bitcoin (BTC) es un activo altamente técnico y fuertemente tendencial. Respeta las estructuras de mercado y los indicadores técnicos clave. Debes centrarte en identificar la tendencia dominante y explotarla.\n\n\
+         Bitcoin (BTC) es un activo altamente técnico y fuertemente tendencial de manera anual. Nuestro objetivo es ganarle al Buy and Hold, aprovechando retrocesos y tendencias bajistas para shortear.\n\n\
          OPCIÓN DE QUEDARSE FLAT / MANTENERSE AL MARGEN:\n\
          Quedarse FLAT (sin operar, eligiendo 'Flat') es una de las decisiones más inteligentes y válidas cuando no hay una dirección clara o cuando hay alta incertidumbre. Si el mercado está en rango lateral, muestra señales contradictorias o volumen bajo, quédate FLAT eligiendo 'Flat'. No sientas la presión de tener que operar en cada vela.\n\n\
-         Si ya tienes una posición abierta (Long o Short) y deseas mantenerla sin abrir nuevas posiciones ni cerrar la actual, debes responder con 'Flat'.\n\n\
+         Si ya tienes una posición abierta (Long o Short) y deseas mantenerla sin abrir nuevas posiciones ni cerrar la actual, debes responder con 'Flat'\n\n\
          REGLAS ALLIANZ (Riesgo y Posiciones):\n\
-         1. NUEVA POSICIÓN: Solo abre otra posición en la misma dirección si alguna posición activa tiene >+200% ROE. No acumules seguidas (All-In).\n\
+         1. NUEVA POSICIÓN: Solo abre otra posición en la misma dirección si alguna posición activa tiene >+200% ROE. No acumules seguidas\n\
          2. STOP LOSS (SL): Define o ajusta un SL (ej. para asegurar ganancias). Si el precio lo cruza, la posición se cierra en ese valor.\n\
+         3. TAKE PROFIT (TP): Define o ajusta un TP (Para asegurar ganancias), cierre parcial o completo de una posición. Si el precio lo cruza, la posición se cierra en ese valor.\n\
          3. CIERRES PARCIALES: Cierra posiciones indicando sus índices (1-based) en 'cerrar_posiciones'.\n\n\
          REGLA DE CONFIANZA:\n\
          Evalúa tu convicción en el movimiento direccional de 0 a 100.\n\
          - Si la tendencia es sumamente clara, con soporte técnico y volumen saludable, tu confianza debe ser alta (100).\n\
-         - Si hay dudas, señales contradictorias o el mercado está en rango lateral, tu confianza debe ser baja (0). En este caso, tu respuesta debe inclinarse a quedar FLAT eligiendo 'Flat'.\n\n\
+         - Si hay dudas, señales contradictorias o el mercado está en rango lateral, tu confianza debe ser baja (0). En este caso, tu respuesta debe inclinarse a quedar FLAT eligiendo 'Flat'.\n\
+         - Si ves el mercado en un rango y lo tenes BIEN definido podes operar el rango con confianza.\n\n\
          Responde ESTRICTAMENTE con este JSON y nada más (sin explicaciones):\n\
          {{\n\
            \"accion\": \"Abrir Long\"|\"Cerrar Long\"|\"Flat\"|\"Abrir Short\"|\"Cerrar Short\",\n\
+           \"cerrar_posiciones\": [índices_1_based_a_cerrar], // o [] si ninguno\n\
+           \"stop_losses\": [sl_posicion1, null, ...],\n\
+           \"take_profits\": [tp_posicion1, null, ...],\n\
            \"confianza\": entero_de_0_a_100\n\
          }}", leverage
     );
     
-    // Calcular indicadores técnicos para pasárselos a Gemma
-    let (indicador_tendencia, indicador_volatilidad, _indicador_posicion, indicador_presion) = 
-        calculate_indicators(&candles, 0, candles.len() - 1, precio_actual);
+    // Calcular la progresión de los indicadores técnicos para pasárselos a Gemma
+    let mut indicators_str = String::new();
+    let actual_history_len = candles.len();
+    for (idx, _) in candles.iter().enumerate() {
+        let win_start = idx.saturating_sub(9);
+        let (tend, vol, _, pres) = calculate_indicators(&candles, win_start, idx, candles[idx].close);
+        let label = if idx == candles.len() - 1 { " (Actual)" } else { "" };
+        let offset = actual_history_len - 1 - idx;
+        indicators_str.push_str(&format!(
+            "- t-{}: Tendencia: {}, Volatilidad: {}, Presión Cuerpo/Volumen: {}{}\n",
+            offset, tend, vol, pres, label
+        ));
+    }
 
     let user_prompt = format!(
         "Precio actual de BTC (Cierre): {:.2} USDT\n\n\
          Historial de las últimas 10 velas (de más antigua a más reciente):\n\
          {}\n\
-         Indicadores Técnicos (Ventana de 10 velas):\n\
-         - Tendencia: {}\n\
-         - Volatilidad: {}\n\
-         - Presión Cuerpo/Volumen: {}\n\n\
+         Indicadores Técnicos (Ventana de 10 velas, de más antigua a más reciente):\n\
+         {}\n\
          Estado de tu Cartera:\n\
          - Saldo libre en USDT (no en margen): {:.2} USDT\n\
          - Posición activa: {:?}\n\
@@ -128,7 +141,7 @@ pub async fn run_live_gemma_step(
          - Equidad total de la cuenta (Equity): {:.2} USDT\n\
          - Comisión por operación: 0.05% sobre el volumen operado\n\n\
          ¿Qué acción tomas? Responde estrictamente en formato JSON.",
-        precio_actual, history_str, indicador_tendencia, indicador_volatilidad, indicador_presion, saldo_usdt, position_type, position_margin,
+        precio_actual, history_str, indicators_str, saldo_usdt, position_type, position_margin,
         position_size_btc, position_size_btc * precio_actual, precio_entrada, liquidation_price, liq_percent,
         floating_pnl, equity
     );
@@ -164,6 +177,13 @@ pub async fn run_live_gemma_step(
                     gemma_action = parsed.accion.to_uppercase().replace(" ", "_");
                     gemma_analisis = parsed.analisis.unwrap_or_else(|| "Sin análisis".to_string());
                     gemma_confidence = parsed.confianza;
+
+                    if let Some(ref sls) = parsed.stop_losses {
+                        println!("⚙️ Stop Losses sugeridos por Gemma: {:?}", sls);
+                    }
+                    if let Some(ref tps) = parsed.take_profits {
+                        println!("⚙️ Take Profits sugeridos por Gemma: {:?}", tps);
+                    }
                     
                     let conf = gemma_confidence.unwrap_or(0);
                     if confidence_threshold > 0 && conf < confidence_threshold {

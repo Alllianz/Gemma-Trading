@@ -15,6 +15,7 @@ pub struct Position {
     pub entry_price: f64,
     pub liquidation_price: f64,
     pub stop_loss: Option<f64>,
+    pub take_profit: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -37,6 +38,8 @@ pub struct GemmaResponse {
     pub cerrar_posiciones: Option<Vec<usize>>,
     #[serde(default)]
     pub stop_losses: Option<Vec<Option<f64>>>,
+    #[serde(default)]
+    pub take_profits: Option<Vec<Option<f64>>>,
     #[serde(default)]
     pub confianza: Option<u32>,
 }

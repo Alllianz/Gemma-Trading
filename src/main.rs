@@ -24,10 +24,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n                      Gemma Trading Bot");
         println!("1. Update DB");
         println!("2. Backtest Completo");
-        println!("3. Prueba de Backtest");
-        println!("4. Configurar Modelo Local (Gemma)");
-        println!("5. Trading en Vivo");
-        println!("6. Salir");
+        println!("3. Backtest Completo (Verbose)");
+        println!("4. Prueba de Backtest (10 velas)");
+        println!("5. Configurar Modelo Local (Gemma)");
+        println!("6. Trading en Vivo");
+        println!("7. Salir");
         print!("Selecciona una opción: ");
         io::stdout().flush()?;
 
@@ -68,7 +69,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            "2" => {
+            "2" | "3" => {
+                let verbose = choice == "3";
                 println!("\nSelecciona la temporalidad para el backtest:");
                 println!("1) 1H (1 Hora)");
                 println!("2) 4H (4 Horas)");
@@ -122,11 +124,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, limit, 70).await {
+                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, limit, 70, verbose).await {
                     println!("❌ Error en el backtest: {}", e);
                 }
             }
-            "3" => {
+            "4" => {
                 println!("\nSelecciona la temporalidad para la prueba de backtest:");
                 println!("1) 1H (1 Hora)");
                 println!("2) 4H (4 Horas)");
@@ -168,11 +170,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, Some(10), 70).await {
+                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, Some(10), 70, true).await {
                     println!("❌ Error en la prueba: {}", e);
                 }
             }
-            "4" => {
+            "5" => {
                 println!("\n[Configurar Modelo Local (Gemma)]");
                 let (curr_url, curr_token) = get_llm_config(db_path).unwrap_or((
                     "http://127.0.0.1:5508/v1/chat/completions".to_string(),
@@ -196,12 +198,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("✅ Configuración de Gemma guardada con éxito en la base de datos.");
                 }
             }
-            "5" => {
+            "6" => {
                 if let Err(e) = trading_en_vivo_menu(db_path, &client).await {
                     println!("❌ Error en el menú de trading en vivo: {}", e);
                 }
             }
-            "6" => {
+            "7" => {
                 println!("👋 ¡Hasta luego!");
                 break;
             }

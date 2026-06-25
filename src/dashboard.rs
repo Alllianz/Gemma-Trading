@@ -17,6 +17,12 @@ pub fn generate_dashboard(
     num_liquidaciones: usize,
     max_drawdown: f64,
     correlation: f64,
+    winrate: f64,
+    profit_factor: f64,
+    sharpe_ratio: f64,
+    recovery_factor: f64,
+    avg_stagnation: f64,
+    max_stagnation: usize,
     filename: &str,
 ) -> Result<(), std::io::Error> {
     let initial_balance = curve.first().map(|(_, eq, _)| *eq).unwrap_or(0.0);
@@ -93,6 +99,39 @@ pub fn generate_dashboard(
                 <span class="text-slate-400 text-sm font-medium">Máximo Drawdown</span>
                 <span class="text-2xl font-bold text-rose-500 mt-2">-{max_drawdown:.2}%</span>
                 <span class="text-xs text-slate-500 mt-1">Pérdida máxima pico a valle</span>
+            </div>
+        </div>
+
+        <!-- Advanced Metrics Grid -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-6">
+            <div class="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-2xl p-6 shadow-xl flex flex-col justify-between hover:border-slate-700/80 transition duration-300">
+                <span class="text-slate-400 text-sm font-medium">Winrate</span>
+                <span class="text-2xl font-bold text-violet-400 mt-2">{winrate:.2}%</span>
+                <span class="text-xs text-slate-500 mt-1">Porcentaje de acierto</span>
+            </div>
+
+            <div class="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-2xl p-6 shadow-xl flex flex-col justify-between hover:border-slate-700/80 transition duration-300">
+                <span class="text-slate-400 text-sm font-medium">Profit Factor</span>
+                <span class="text-2xl font-bold text-emerald-400 mt-2">{profit_factor:.2}</span>
+                <span class="text-xs text-slate-500 mt-1">Ganancia Bruta / Pérdida Bruta</span>
+            </div>
+
+            <div class="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-2xl p-6 shadow-xl flex flex-col justify-between hover:border-slate-700/80 transition duration-300">
+                <span class="text-slate-400 text-sm font-medium">Sharpe Ratio</span>
+                <span class="text-2xl font-bold text-sky-400 mt-2">{sharpe_ratio:.2}</span>
+                <span class="text-xs text-slate-500 mt-1">Anualizado</span>
+            </div>
+
+            <div class="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-2xl p-6 shadow-xl flex flex-col justify-between hover:border-slate-700/80 transition duration-300">
+                <span class="text-slate-400 text-sm font-medium">Recovery Factor</span>
+                <span class="text-2xl font-bold text-amber-500 mt-2">{recovery_factor:.2}</span>
+                <span class="text-xs text-slate-500 mt-1">Net Profit / Max DD</span>
+            </div>
+
+            <div class="bg-slate-900/60 backdrop-blur-md border border-slate-800/80 rounded-2xl p-6 shadow-xl flex flex-col justify-between hover:border-slate-700/80 transition duration-300">
+                <span class="text-slate-400 text-sm font-medium">Estancamiento</span>
+                <span class="text-xl font-bold text-slate-200 mt-2">Max: {max_stagnation} v.</span>
+                <span class="text-xs text-slate-400 mt-1">Promedio: {avg_stagnation:.1} v.</span>
             </div>
         </div>
 
@@ -245,6 +284,12 @@ pub fn generate_dashboard(
         num_liquidaciones = num_liquidaciones,
         liq_color = if num_liquidaciones > 0 { "text-rose-500 animate-pulse" } else { "text-slate-400" },
         correlation = correlation,
+        winrate = winrate,
+        profit_factor = profit_factor,
+        sharpe_ratio = sharpe_ratio,
+        recovery_factor = recovery_factor,
+        avg_stagnation = avg_stagnation,
+        max_stagnation = max_stagnation,
         labels_json = labels_json,
         data_json = data_json,
         bh_data_json = bh_data_json
