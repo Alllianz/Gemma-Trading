@@ -55,6 +55,7 @@ pub async fn run_backtest(
     limit: Option<usize>,
     confidence_threshold: u32,
     verbose: bool,
+    dynamic_risk_leverage: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let candles = get_candles(db_path, timeframe, limit)?;
     if candles.is_empty() {
@@ -85,31 +86,43 @@ pub async fn run_backtest(
     let mut trade_pnls: Vec<f64> = Vec::new();
 
     // El umbral de liquidación según la fórmula
-    let liq_percent = get_liquidation_percentage(leverage);
 
-    let system_prompt = format!(
-        "Bot de trading de futuros BTCUSDT (Margen Aislado {}X, Margen operado: {}% equidad). Comisión: 0.05%.\n\n\
-         CONTEXTO DEL ACTIVO:\n\
-         Bitcoin (BTC) es un activo altamente técnico y fuertemente tendencial. Respeta las estructuras de mercado y los indicadores técnicos clave. Debes centrarte en identificar la tendencia dominante y explotarla.\n\n\
-         OPCIÓN DE QUEDARSE FLAT / MANTENERSE AL MARGEN:\n\
-         Quedarse FLAT (sin operar, eligiendo 'Flat') es una de las decisiones más inteligentes y válidas cuando no hay una dirección clara o cuando hay alta incertidumbre. Si el mercado está en rango lateral, muestra señales contradictorias o volumen bajo, quédate FLAT eligiendo 'Flat'. No sientas la presión de tener que operar en cada vela.\n\n\
-         Si ya tienes una posición abierta (Long o Short) y deseas mantenerla sin abrir nuevas posiciones ni cerrar la actual, debes responder con 'Flat'.\n\n\
-         REGLAS ALLIANZ (Riesgo y Posiciones):\n\
-         1. NUEVA POSICIÓN: Solo abre otra posición en la misma dirección si alguna posición activa tiene >+200% ROE. No acumules seguidas (All-In).\n\
-         2. STOP LOSS (SL): Define o ajusta un SL (ej. para asegurar ganancias). Si el precio lo cruza, la posición se cierra en ese valor.\n\
-         3. CIERRES PARCIALES: Cierra posiciones indicando sus índices (1-based) en 'cerrar_posiciones'.\n\n\
-         REGLA DE CONFIANZA:\n\
-         Evalúa tu convicción en el movimiento direccional de 0 a 100.\n\
-         - Si la tendencia es sumamente clara, con soporte técnico y volumen saludable, tu confianza debe ser alta (100).\n\
-         - Si hay dudas, señales contradictorias o el mercado está en rango lateral, tu confianza debe ser baja (0). En este caso, tu respuesta debe inclinarse a quedar FLAT eligiendo 'Flat'.\n\n\
-         Responde ESTRICTAMENTE con este JSON y nada más (sin explicaciones):\n\
-         {{\n\
-           \"accion\": \"Abrir Long\"|\"Cerrar Long\"|\"Flat\"|\"Abrir Short\"|\"Cerrar Short\",\n\
-           \"cerrar_posiciones\": [índices_1_based_a_cerrar], // o [] si ninguno\n\
-           \"stop_losses\": [sl_posicion1, null, ...],\n\
-           \"confianza\": entero_de_0_a_100\n\
-         }}", leverage, risk_percent
-    );
+    let system_prompt = if dynamic_risk_leverage {
+        format!(
+            "🧠 INSTRUCCIONES DE SISTEMA
+- Estrategia: Seguimiento de tendencia y explotación de impulsos en BTCUSDT.
+- Órdenes: Market (Abrir Long/Short), Stop-Loss (SL) y Take-Profit (TP).
+- Razonamiento: Sé extremadamente breve en tu pensamiento (máximo 3 líneas). Ve directo al grano sin dar rodeos.
+- Responde ÚNICAMENTE con un objeto JSON. No agregues explicaciones fuera de él ni uses bloques de código markdown.
+
+Ejemplo de respuesta esperada:
+{{
+  \"accion\": \"Flat\",
+  \"cerrar_posiciones\": [],
+  \"stop_losses\": [null],
+  \"take_profits\": [null],
+  \"apalancamiento\": 5,
+  \"riesgo\": 10
+}}"
+        )
+    } else {
+        format!(
+            "🧠 INSTRUCCIONES DE SISTEMA
+- Estrategia: Seguimiento de tendencia y explotación de impulsos en BTCUSDT.
+- Órdenes: Market (Abrir Long/Short), Stop-Loss (SL) y Take-Profit (TP).
+- Razonamiento: Sé extremadamente breve en tu pensamiento (máximo 3 líneas). Ve directo al grano sin dar rodeos.
+- Responde ÚNICAMENTE con un objeto JSON. No agregues explicaciones fuera de él ni uses bloques de código markdown.
+
+Ejemplo de respuesta esperada:
+{{
+  \"accion\": \"Flat\",
+  \"cerrar_posiciones\": [],
+  \"stop_losses\": [null],
+  \"take_profits\": [null],
+  \"confianza\": 80
+}}"
+        )
+    };
 
     let mut active_positions: Vec<Position> = Vec::new();
 
@@ -228,7 +241,7 @@ pub async fn run_backtest(
             max_drawdown = dd;
         }
 
-        println!("\n=== [Paso {}/{}] {} | Precio Actual: {:.2} USDT ===", i + 1, candles.len(), date_str, precio_actual);
+        println!("\n=== [Paso {}/{}] {} | Precio Actual: {:.2} USDT | Buy & Hold ($10k): {:.2} USDT ===", i + 1, candles.len(), date_str, precio_actual, 10000.0 * (precio_actual / initial_price));
         println!("💼 Estado: Saldo: {:.2} USDT | Margen Total: {:.2} USDT | Posiciones Activas: {} | PnL Flotante: {:.2} USDT | Equity: {:.2} USDT",
             saldo_usdt, total_margins, active_positions.len(), total_floating_pnl, equity
         );
@@ -272,41 +285,48 @@ pub async fn run_backtest(
             }
         }
 
-        // Calcular la progresión de los indicadores técnicos para pasárselos a Gemma
+        // Calcular la progresión de los indicadores técnicos de las últimas 10 velas (para ver aceleración/desaceleración)
         let mut indicators_str = String::new();
         for idx in start_idx..=i {
-            let win_start = idx.saturating_sub(9);
-            let (tend, vol, _, pres) = calculate_indicators(&candles, win_start, idx, candles[idx].close);
             let label = if idx == i { " (Actual)" } else { "" };
             let offset = i - idx;
+            let ind_val = calculate_indicators(&candles, idx, candles[idx].close);
             indicators_str.push_str(&format!(
-                "- t-{}: Tendencia: {}, Volatilidad: {}, Presión Cuerpo/Volumen: {}{}\n",
-                offset, tend, vol, pres, label
+                "- t-{}{}: {}\n",
+                offset, label, ind_val
             ));
         }
 
         // 4. Prompt a Gemma
         let user_prompt = format!(
-            "Precio actual de BTC (Cierre): {:.2} USDT\n\n\
-             Historial de las últimas 10 velas (de más antigua a más reciente):\n\
-             {}\n\
-             Indicadores Técnicos (Ventana de 10 velas, de más antigua a más reciente):\n\
-             {}\n\
-             Estado de tu Cartera:\n\
-             - Saldo libre en USDT (no en margen): {:.2} USDT\n\
-             - Posiciones Activas:\n\
-             {}\n\
-             - Equidad total de la cuenta (Equity): {:.2} USDT\n\
-             - Apalancamiento actual: {:.1}x\n\
-             - Comisión por operación: 0.05% sobre el volumen operado\n\n\
-             ¿Qué acción tomas? Responde estrictamente en formato JSON.",
-            precio_actual, history_str, indicators_str, saldo_usdt, positions_str, equity, leverage
+            "📊 DATOS DE MERCADO (recientes)
+- Precio actual de BTC (Cierre): {:.2} USDT
+- Historial de las últimas 10 velas:
+{}
+- Liquidaciones en esta simulación: {}
+
+📈 INDICADORES TÉCNICOS CALCULADOS
+{}
+📋 ESTADO DE LA CUENTA Y POSICIÓN
+- Saldo libre en USDT (no en margen): {:.2} USDT
+- Equidad total de la cuenta (Equity): {:.2} USDT
+- Apalancamiento actual: {:.1}x
+- Risk parameters: % máximo a arriesgar por operación: {}%
+- Posiciones Activas y Órdenes Pendientes (SL/TP):
+{}
+- Historial reciente de operaciones (PnLs Realizados de trades cerrados):
+{:?}
+
+¿Qué acción tomas? Responde estrictamente en formato JSON.",
+            precio_actual, history_str, num_liquidaciones, indicators_str, saldo_usdt, equity, leverage, risk_percent, positions_str, trade_pnls.iter().rev().take(5).collect::<Vec<_>>()
         );
 
         let mut retries = 3;
         let mut gemma_action = "FLAT".to_string();
         let mut gemma_analisis = "Sin análisis".to_string();
         let mut gemma_confidence = None;
+        let mut parsed_leverage = None;
+        let mut parsed_risk = None;
 
         while retries > 0 {
             if verbose {
@@ -324,10 +344,19 @@ pub async fn run_backtest(
                     }
                     if let Some(parsed) = parse_gemma_response(&content) {
                         gemma_action = parsed.accion.to_uppercase().replace(" ", "_");
+                        if gemma_action == "LONG" || gemma_action == "COMPRAR" {
+                            gemma_action = "ABRIR_LONG".to_string();
+                        } else if gemma_action == "SHORT" || gemma_action == "VENDER" {
+                            gemma_action = "ABRIR_SHORT".to_string();
+                        }
                         if let Some(ref ans) = parsed.analisis {
                             gemma_analisis = ans.clone();
                         }
                         gemma_confidence = parsed.confianza;
+                        if dynamic_risk_leverage {
+                            parsed_leverage = parsed.apalancamiento;
+                            parsed_risk = parsed.riesgo;
+                        }
 
                         let conf = gemma_confidence.unwrap_or(0);
                         if confidence_threshold > 0 && conf < confidence_threshold {
@@ -430,15 +459,23 @@ pub async fn run_backtest(
 
         // 5. Ejecutar la acción elegida
         if gemma_action == "ABRIR_LONG" {
-            // Abrir nuevo LONG
-            let margin = equity * (risk_percent / 100.0);
-            let size_usdt = margin * leverage;
-            let opening_fee = size_usdt * fee_rate;
+            let pos_leverage = if dynamic_risk_leverage { parsed_leverage.unwrap_or(leverage) } else { leverage } as f64;
+            let pos_risk = if dynamic_risk_leverage { parsed_risk.unwrap_or(risk_percent) } else { risk_percent };
+            let mut margin = equity * (pos_risk / 100.0);
+            let mut size_usdt = margin * pos_leverage;
+            let mut opening_fee = size_usdt * fee_rate;
 
-            if saldo_usdt >= margin + opening_fee {
+            if margin + opening_fee > saldo_usdt {
+                margin = (saldo_usdt / (1.0 + pos_leverage * fee_rate)) - 0.05;
+                size_usdt = margin * pos_leverage;
+                opening_fee = size_usdt * fee_rate;
+            }
+
+            if margin > 0.01 && saldo_usdt >= margin + opening_fee {
                 saldo_usdt -= margin + opening_fee;
                 let pos_size_btc = size_usdt / precio_actual;
-                let pos_liq_price = precio_actual * (1.0 - liq_percent / 100.0);
+                let pos_liq_percent = get_liquidation_percentage(pos_leverage);
+                let pos_liq_price = precio_actual * (1.0 - pos_liq_percent / 100.0);
                 active_positions.push(Position {
                     position_type: PositionType::Long,
                     margin,
@@ -449,8 +486,8 @@ pub async fn run_backtest(
                     take_profit: None,
                 });
                 num_compras += 1;
-                println!("🛒 LONG ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
-                    margin, pos_size_btc, size_usdt, pos_liq_price, opening_fee
+                println!("🛒 LONG ABIERTO: Margen: {:.2} USDT (Riesgo: {:.1}%) | Apalancamiento: {:.1}x | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
+                    margin, pos_risk, pos_leverage, pos_size_btc, size_usdt, pos_liq_price, opening_fee
                 );
             } else {
                 println!("⏳ Margen/saldo insuficiente para abrir LONG.");
@@ -480,14 +517,23 @@ pub async fn run_backtest(
             num_ventas += 1;
         } else if gemma_action == "ABRIR_SHORT" {
             // Abrir nuevo SHORT
-            let margin = equity * (risk_percent / 100.0);
-            let size_usdt = margin * leverage;
-            let opening_fee = size_usdt * fee_rate;
+            let pos_leverage = if dynamic_risk_leverage { parsed_leverage.unwrap_or(leverage) } else { leverage } as f64;
+            let pos_risk = if dynamic_risk_leverage { parsed_risk.unwrap_or(risk_percent) } else { risk_percent };
+            let mut margin = equity * (pos_risk / 100.0);
+            let mut size_usdt = margin * pos_leverage;
+            let mut opening_fee = size_usdt * fee_rate;
 
-            if saldo_usdt >= margin + opening_fee {
+            if margin + opening_fee > saldo_usdt {
+                margin = (saldo_usdt / (1.0 + pos_leverage * fee_rate)) - 0.05;
+                size_usdt = margin * pos_leverage;
+                opening_fee = size_usdt * fee_rate;
+            }
+
+            if margin > 0.01 && saldo_usdt >= margin + opening_fee {
                 saldo_usdt -= margin + opening_fee;
                 let pos_size_btc = size_usdt / precio_actual;
-                let pos_liq_price = precio_actual * (1.0 + liq_percent / 100.0);
+                let pos_liq_percent = get_liquidation_percentage(pos_leverage);
+                let pos_liq_price = precio_actual * (1.0 + pos_liq_percent / 100.0);
                 active_positions.push(Position {
                     position_type: PositionType::Short,
                     margin,
@@ -498,8 +544,8 @@ pub async fn run_backtest(
                     take_profit: None,
                 });
                 num_ventas += 1;
-                println!("🛒 SHORT ABIERTO: Margen: {:.2} USDT | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
-                    margin, pos_size_btc, size_usdt, pos_liq_price, opening_fee
+                println!("🛒 SHORT ABIERTO: Margen: {:.2} USDT (Riesgo: {:.1}%) | Apalancamiento: {:.1}x | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
+                    margin, pos_risk, pos_leverage, pos_size_btc, size_usdt, pos_liq_price, opening_fee
                 );
             } else {
                 println!("⏳ Margen/saldo insuficiente para abrir SHORT.");

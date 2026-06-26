@@ -82,68 +82,60 @@ pub async fn run_live_gemma_step(
         ));
     }
     
-    // System and User prompt
     let system_prompt = format!(
-        "Bot de trading de futuros BTCUSDT (Margen Aislado {}X, Margen operado: 10% saldo). Comisión: 0.05%.\n\n\
-         CONTEXTO DEL ACTIVO:\n\
-         Bitcoin (BTC) es un activo altamente técnico y fuertemente tendencial de manera anual. Nuestro objetivo es ganarle al Buy and Hold, aprovechando retrocesos y tendencias bajistas para shortear.\n\n\
-         OPCIÓN DE QUEDARSE FLAT / MANTENERSE AL MARGEN:\n\
-         Quedarse FLAT (sin operar, eligiendo 'Flat') es una de las decisiones más inteligentes y válidas cuando no hay una dirección clara o cuando hay alta incertidumbre. Si el mercado está en rango lateral, muestra señales contradictorias o volumen bajo, quédate FLAT eligiendo 'Flat'. No sientas la presión de tener que operar en cada vela.\n\n\
-         Si ya tienes una posición abierta (Long o Short) y deseas mantenerla sin abrir nuevas posiciones ni cerrar la actual, debes responder con 'Flat'\n\n\
-         REGLAS ALLIANZ (Riesgo y Posiciones):\n\
-         1. NUEVA POSICIÓN: Solo abre otra posición en la misma dirección si alguna posición activa tiene >+200% ROE. No acumules seguidas\n\
-         2. STOP LOSS (SL): Define o ajusta un SL (ej. para asegurar ganancias). Si el precio lo cruza, la posición se cierra en ese valor.\n\
-         3. TAKE PROFIT (TP): Define o ajusta un TP (Para asegurar ganancias), cierre parcial o completo de una posición. Si el precio lo cruza, la posición se cierra en ese valor.\n\
-         3. CIERRES PARCIALES: Cierra posiciones indicando sus índices (1-based) en 'cerrar_posiciones'.\n\n\
-         REGLA DE CONFIANZA:\n\
-         Evalúa tu convicción en el movimiento direccional de 0 a 100.\n\
-         - Si la tendencia es sumamente clara, con soporte técnico y volumen saludable, tu confianza debe ser alta (100).\n\
-         - Si hay dudas, señales contradictorias o el mercado está en rango lateral, tu confianza debe ser baja (0). En este caso, tu respuesta debe inclinarse a quedar FLAT eligiendo 'Flat'.\n\
-         - Si ves el mercado en un rango y lo tenes BIEN definido podes operar el rango con confianza.\n\n\
-         Responde ESTRICTAMENTE con este JSON y nada más (sin explicaciones):\n\
-         {{\n\
-           \"accion\": \"Abrir Long\"|\"Cerrar Long\"|\"Flat\"|\"Abrir Short\"|\"Cerrar Short\",\n\
-           \"cerrar_posiciones\": [índices_1_based_a_cerrar], // o [] si ninguno\n\
-           \"stop_losses\": [sl_posicion1, null, ...],\n\
-           \"take_profits\": [tp_posicion1, null, ...],\n\
-           \"confianza\": entero_de_0_a_100\n\
-         }}", leverage
+        "🧠 INSTRUCCIONES DE SISTEMA
+- Estrategia: Bot de trading de futuros BTCUSDT (Apalancamiento {}X, Margen: 10% saldo).
+- Razonamiento: Sé extremadamente breve en tu pensamiento (máximo 3 líneas). Ve directo al grano sin dar rodeos.
+- Responde ÚNICAMENTE con un objeto JSON. No agregues explicaciones fuera de él ni uses bloques de código markdown.
+
+Ejemplo de respuesta esperada:
+{{
+  \"accion\": \"MANTENER\",
+  \"cerrar_posiciones\": [],
+  \"stop_losses\": [null],
+  \"take_profits\": [null],
+  \"confianza\": 80
+}}", leverage
     );
     
-    // Calcular la progresión de los indicadores técnicos para pasárselos a Gemma
+    // Calcular la progresión de los indicadores técnicos de las últimas 10 velas (para ver aceleración/desaceleración)
     let mut indicators_str = String::new();
     let actual_history_len = candles.len();
     for (idx, _) in candles.iter().enumerate() {
-        let win_start = idx.saturating_sub(9);
-        let (tend, vol, _, pres) = calculate_indicators(&candles, win_start, idx, candles[idx].close);
         let label = if idx == candles.len() - 1 { " (Actual)" } else { "" };
         let offset = actual_history_len - 1 - idx;
+        let ind_val = calculate_indicators(&candles, idx, candles[idx].close);
         indicators_str.push_str(&format!(
-            "- t-{}: Tendencia: {}, Volatilidad: {}, Presión Cuerpo/Volumen: {}{}\n",
-            offset, tend, vol, pres, label
+            "- t-{}{}: {}\n",
+            offset, label, ind_val
         ));
     }
 
     let user_prompt = format!(
-        "Precio actual de BTC (Cierre): {:.2} USDT\n\n\
-         Historial de las últimas 10 velas (de más antigua a más reciente):\n\
-         {}\n\
-         Indicadores Técnicos (Ventana de 10 velas, de más antigua a más reciente):\n\
-         {}\n\
-         Estado de tu Cartera:\n\
-         - Saldo libre en USDT (no en margen): {:.2} USDT\n\
-         - Posición activa: {:?}\n\
-         - Margen de la posición: {:.2} USDT (Modo Aislado)\n\
-         - Tamaño de posición equivalente: {:.6} BTC (${:.2})\n\
-         - Precio de entrada: {:.2} USDT\n\
-         - Precio de liquidación estimado: {:.2} USDT (Si se mueve {:.3}% en contra)\n\
-         - PnL Flotante actual: {:.2} USDT\n\
-         - Equidad total de la cuenta (Equity): {:.2} USDT\n\
-         - Comisión por operación: 0.05% sobre el volumen operado\n\n\
-         ¿Qué acción tomas? Responde estrictamente en formato JSON.",
-        precio_actual, history_str, indicators_str, saldo_usdt, position_type, position_margin,
+        "📊 DATOS DE MERCADO (recientes)
+- Precio actual de BTC (Cierre): {:.2} USDT
+- Historial de las últimas 10 velas:
+{}
+
+📈 INDICADORES TÉCNICOS CALCULADOS
+{}
+
+📋 ESTADO DE LA CUENTA Y POSICIÓN
+- Saldo libre en USDT (no en margen): {:.2} USDT
+- Equidad total de la cuenta (Equity): {:.2} USDT
+- Apalancamiento actual: {:.1}x
+- Risk parameters: % máximo a arriesgar por operación: 10%
+- Posición activa actual: {:?}
+- Margen de la posición: {:.2} USDT (Modo Aislado)
+- Tamaño de posición equivalente: {:.6} BTC (${:.2})
+- Precio de entrada: {:.2} USDT
+- Precio de liquidación estimado: {:.2} USDT (Si se mueve {:.3}% en contra)
+- PnL Flotante actual: {:.2} USDT
+
+¿Qué acción tomas? Responde estrictamente en formato JSON.",
+        precio_actual, history_str, indicators_str, saldo_usdt, equity, leverage as f64, position_type, position_margin,
         position_size_btc, position_size_btc * precio_actual, precio_entrada, liquidation_price, liq_percent,
-        floating_pnl, equity
+        floating_pnl
     );
     
     println!("\n=== [Paso de Trading en Vivo] {} | Precio Actual: {:.2} USDT ===", 
@@ -611,7 +603,7 @@ pub async fn trading_en_vivo_menu(db_path: &str, client: &reqwest::Client) -> Re
                                     
                                     // Run one live step
                                     println!("🧠 Evaluando mercado con Gemma ({})...", timeframe);
-                                    if let Err(e) = run_live_gemma_step(db_path, timeframe, client, &api_key, &api_secret, leverage, use_testnet, 70).await {
+                                    if let Err(e) = run_live_gemma_step(db_path, timeframe, client, &api_key, &api_secret, leverage, use_testnet, 60).await {
                                         println!("⚠️ Error en el paso de trading: {}", e);
                                     }
                                     

@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("1. Update DB");
         println!("2. Backtest Completo");
         println!("3. Backtest Completo (Verbose)");
-        println!("4. Prueba de Backtest (10 velas)");
+        println!("4. Backtest Completo (Gemma decide apalancamiento y capital)");
         println!("5. Configurar Modelo Local (Gemma)");
         println!("6. Trading en Vivo");
         println!("7. Salir");
@@ -69,8 +69,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            "2" | "3" => {
+            "2" | "3" | "4" => {
                 let verbose = choice == "3";
+                let dynamic_risk_leverage = choice == "4";
                 println!("\nSelecciona la temporalidad para el backtest:");
                 println!("1) 1H (1 Hora)");
                 println!("2) 4H (4 Horas)");
@@ -88,26 +89,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "1h"
                 };
 
-                print!("Introduce el apalancamiento a usar (ej. 10): ");
-                let _ = io::stdout().flush();
-                let mut lev_input = String::new();
                 let mut leverage = 10.0;
-                if io::stdin().read_line(&mut lev_input).is_ok() {
-                    if let Ok(num) = lev_input.trim().parse::<f64>() {
-                        if num > 0.0 {
-                            leverage = num;
+                let mut risk_percent = 10.0;
+
+                if !dynamic_risk_leverage {
+                    print!("Introduce el apalancamiento a usar (ej. 10): ");
+                    let _ = io::stdout().flush();
+                    let mut lev_input = String::new();
+                    if io::stdin().read_line(&mut lev_input).is_ok() {
+                        if let Ok(num) = lev_input.trim().parse::<f64>() {
+                            if num > 0.0 {
+                                leverage = num;
+                            }
                         }
                     }
-                }
 
-                print!("Introduce el porcentaje de capital a arriesgar por operación (ej. 10 para 10%): ");
-                let _ = io::stdout().flush();
-                let mut risk_input = String::new();
-                let mut risk_percent = 10.0;
-                if io::stdin().read_line(&mut risk_input).is_ok() {
-                    if let Ok(num) = risk_input.trim().parse::<f64>() {
-                        if num > 0.0 && num <= 100.0 {
-                            risk_percent = num;
+                    print!("Introduce el porcentaje de capital a arriesgar por operación (ej. 10 para 10%): ");
+                    let _ = io::stdout().flush();
+                    let mut risk_input = String::new();
+                    if io::stdin().read_line(&mut risk_input).is_ok() {
+                        if let Ok(num) = risk_input.trim().parse::<f64>() {
+                            if num > 0.0 && num <= 100.0 {
+                                risk_percent = num;
+                            }
                         }
                     }
                 }
@@ -124,54 +128,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, limit, 70, verbose).await {
+                let conf_threshold = if dynamic_risk_leverage { 0 } else { 60 };
+                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, limit, conf_threshold, verbose, dynamic_risk_leverage).await {
                     println!("❌ Error en el backtest: {}", e);
-                }
-            }
-            "4" => {
-                println!("\nSelecciona la temporalidad para la prueba de backtest:");
-                println!("1) 1H (1 Hora)");
-                println!("2) 4H (4 Horas)");
-                println!("3) 1D (1 Día)");
-                print!("Selecciona una opción: ");
-                let _ = io::stdout().flush();
-                let mut tf_choice = String::new();
-                let timeframe = if io::stdin().read_line(&mut tf_choice).is_ok() {
-                    match tf_choice.trim() {
-                        "2" => "4h",
-                        "3" => "1d",
-                        _ => "1h",
-                    }
-                } else {
-                    "1h"
-                };
-
-                print!("Introduce el apalancamiento a usar (ej. 10): ");
-                let _ = io::stdout().flush();
-                let mut lev_input = String::new();
-                let mut leverage = 10.0;
-                if io::stdin().read_line(&mut lev_input).is_ok() {
-                    if let Ok(num) = lev_input.trim().parse::<f64>() {
-                        if num > 0.0 {
-                            leverage = num;
-                        }
-                    }
-                }
-
-                print!("Introduce el porcentaje de capital a arriesgar por operación (ej. 10 para 10%): ");
-                let _ = io::stdout().flush();
-                let mut risk_input = String::new();
-                let mut risk_percent = 10.0;
-                if io::stdin().read_line(&mut risk_input).is_ok() {
-                    if let Ok(num) = risk_input.trim().parse::<f64>() {
-                        if num > 0.0 && num <= 100.0 {
-                            risk_percent = num;
-                        }
-                    }
-                }
-
-                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, Some(10), 70, true).await {
-                    println!("❌ Error en la prueba: {}", e);
                 }
             }
             "5" => {

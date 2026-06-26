@@ -42,6 +42,10 @@ pub struct GemmaResponse {
     pub take_profits: Option<Vec<Option<f64>>>,
     #[serde(default)]
     pub confianza: Option<u32>,
+    #[serde(default)]
+    pub apalancamiento: Option<f64>,
+    #[serde(default)]
+    pub riesgo: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
