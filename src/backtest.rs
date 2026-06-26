@@ -459,38 +459,53 @@ Ejemplo de respuesta esperada:
 
         // 5. Ejecutar la acción elegida
         if gemma_action == "ABRIR_LONG" {
-            let pos_leverage = if dynamic_risk_leverage { parsed_leverage.unwrap_or(leverage) } else { leverage } as f64;
-            let pos_risk = if dynamic_risk_leverage { parsed_risk.unwrap_or(risk_percent) } else { risk_percent };
-            let mut margin = equity * (pos_risk / 100.0);
-            let mut size_usdt = margin * pos_leverage;
-            let mut opening_fee = size_usdt * fee_rate;
-
-            if margin + opening_fee > saldo_usdt {
-                margin = (saldo_usdt / (1.0 + pos_leverage * fee_rate)) - 0.05;
-                size_usdt = margin * pos_leverage;
-                opening_fee = size_usdt * fee_rate;
-            }
-
-            if margin > 0.01 && saldo_usdt >= margin + opening_fee {
-                saldo_usdt -= margin + opening_fee;
-                let pos_size_btc = size_usdt / precio_actual;
-                let pos_liq_percent = get_liquidation_percentage(pos_leverage);
-                let pos_liq_price = precio_actual * (1.0 - pos_liq_percent / 100.0);
-                active_positions.push(Position {
-                    position_type: PositionType::Long,
-                    margin,
-                    size_btc: pos_size_btc,
-                    entry_price: precio_actual,
-                    liquidation_price: pos_liq_price,
-                    stop_loss: None,
-                    take_profit: None,
-                });
-                num_compras += 1;
-                println!("🛒 LONG ABIERTO: Margen: {:.2} USDT (Riesgo: {:.1}%) | Apalancamiento: {:.1}x | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
-                    margin, pos_risk, pos_leverage, pos_size_btc, size_usdt, pos_liq_price, opening_fee
-                );
+            let active_longs: Vec<&Position> = active_positions.iter().filter(|p| p.position_type == PositionType::Long).collect();
+            let can_open = if active_longs.is_empty() {
+                true
             } else {
-                println!("⏳ Margen/saldo insuficiente para abrir LONG.");
+                active_longs.iter().any(|pos| {
+                    let pnl = (precio_actual - pos.entry_price) * pos.size_btc;
+                    let roe = (pnl / pos.margin) * 100.0;
+                    roe >= 200.0
+                })
+            };
+
+            if !can_open {
+                println!("⏳ Bloqueado abrir LONG: Existe una posición LONG activa pero ninguna tiene >= +200% ROE.");
+            } else {
+                let pos_leverage = if dynamic_risk_leverage { parsed_leverage.unwrap_or(leverage) } else { leverage } as f64;
+                let pos_risk = if dynamic_risk_leverage { parsed_risk.unwrap_or(risk_percent) } else { risk_percent };
+                let mut margin = equity * (pos_risk / 100.0);
+                let mut size_usdt = margin * pos_leverage;
+                let mut opening_fee = size_usdt * fee_rate;
+
+                if margin + opening_fee > saldo_usdt {
+                    margin = (saldo_usdt / (1.0 + pos_leverage * fee_rate)) - 0.05;
+                    size_usdt = margin * pos_leverage;
+                    opening_fee = size_usdt * fee_rate;
+                }
+
+                if margin > 0.01 && saldo_usdt >= margin + opening_fee {
+                    saldo_usdt -= margin + opening_fee;
+                    let pos_size_btc = size_usdt / precio_actual;
+                    let pos_liq_percent = get_liquidation_percentage(pos_leverage);
+                    let pos_liq_price = precio_actual * (1.0 - pos_liq_percent / 100.0);
+                    active_positions.push(Position {
+                        position_type: PositionType::Long,
+                        margin,
+                        size_btc: pos_size_btc,
+                        entry_price: precio_actual,
+                        liquidation_price: pos_liq_price,
+                        stop_loss: None,
+                        take_profit: None,
+                    });
+                    num_compras += 1;
+                    println!("🛒 LONG ABIERTO: Margen: {:.2} USDT (Riesgo: {:.1}%) | Apalancamiento: {:.1}x | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
+                        margin, pos_risk, pos_leverage, pos_size_btc, size_usdt, pos_liq_price, opening_fee
+                    );
+                } else {
+                    println!("⏳ Margen/saldo insuficiente para abrir LONG.");
+                }
             }
         } else if gemma_action == "CERRAR_LONG" {
             // Cerrar todos los LONGS
@@ -516,39 +531,54 @@ Ejemplo de respuesta esperada:
             }
             num_ventas += 1;
         } else if gemma_action == "ABRIR_SHORT" {
-            // Abrir nuevo SHORT
-            let pos_leverage = if dynamic_risk_leverage { parsed_leverage.unwrap_or(leverage) } else { leverage } as f64;
-            let pos_risk = if dynamic_risk_leverage { parsed_risk.unwrap_or(risk_percent) } else { risk_percent };
-            let mut margin = equity * (pos_risk / 100.0);
-            let mut size_usdt = margin * pos_leverage;
-            let mut opening_fee = size_usdt * fee_rate;
-
-            if margin + opening_fee > saldo_usdt {
-                margin = (saldo_usdt / (1.0 + pos_leverage * fee_rate)) - 0.05;
-                size_usdt = margin * pos_leverage;
-                opening_fee = size_usdt * fee_rate;
-            }
-
-            if margin > 0.01 && saldo_usdt >= margin + opening_fee {
-                saldo_usdt -= margin + opening_fee;
-                let pos_size_btc = size_usdt / precio_actual;
-                let pos_liq_percent = get_liquidation_percentage(pos_leverage);
-                let pos_liq_price = precio_actual * (1.0 + pos_liq_percent / 100.0);
-                active_positions.push(Position {
-                    position_type: PositionType::Short,
-                    margin,
-                    size_btc: pos_size_btc,
-                    entry_price: precio_actual,
-                    liquidation_price: pos_liq_price,
-                    stop_loss: None,
-                    take_profit: None,
-                });
-                num_ventas += 1;
-                println!("🛒 SHORT ABIERTO: Margen: {:.2} USDT (Riesgo: {:.1}%) | Apalancamiento: {:.1}x | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
-                    margin, pos_risk, pos_leverage, pos_size_btc, size_usdt, pos_liq_price, opening_fee
-                );
+            let active_shorts: Vec<&Position> = active_positions.iter().filter(|p| p.position_type == PositionType::Short).collect();
+            let can_open = if active_shorts.is_empty() {
+                true
             } else {
-                println!("⏳ Margen/saldo insuficiente para abrir SHORT.");
+                active_shorts.iter().any(|pos| {
+                    let pnl = (pos.entry_price - precio_actual) * pos.size_btc;
+                    let roe = (pnl / pos.margin) * 100.0;
+                    roe >= 200.0
+                })
+            };
+
+            if !can_open {
+                println!("⏳ Bloqueado abrir SHORT: Existe una posición SHORT activa pero ninguna tiene >= +200% ROE.");
+            } else {
+                // Abrir nuevo SHORT
+                let pos_leverage = if dynamic_risk_leverage { parsed_leverage.unwrap_or(leverage) } else { leverage } as f64;
+                let pos_risk = if dynamic_risk_leverage { parsed_risk.unwrap_or(risk_percent) } else { risk_percent };
+                let mut margin = equity * (pos_risk / 100.0);
+                let mut size_usdt = margin * pos_leverage;
+                let mut opening_fee = size_usdt * fee_rate;
+
+                if margin + opening_fee > saldo_usdt {
+                    margin = (saldo_usdt / (1.0 + pos_leverage * fee_rate)) - 0.05;
+                    size_usdt = margin * pos_leverage;
+                    opening_fee = size_usdt * fee_rate;
+                }
+
+                if margin > 0.01 && saldo_usdt >= margin + opening_fee {
+                    saldo_usdt -= margin + opening_fee;
+                    let pos_size_btc = size_usdt / precio_actual;
+                    let pos_liq_percent = get_liquidation_percentage(pos_leverage);
+                    let pos_liq_price = precio_actual * (1.0 + pos_liq_percent / 100.0);
+                    active_positions.push(Position {
+                        position_type: PositionType::Short,
+                        margin,
+                        size_btc: pos_size_btc,
+                        entry_price: precio_actual,
+                        liquidation_price: pos_liq_price,
+                        stop_loss: None,
+                        take_profit: None,
+                    });
+                    num_ventas += 1;
+                    println!("🛒 SHORT ABIERTO: Margen: {:.2} USDT (Riesgo: {:.1}%) | Apalancamiento: {:.1}x | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT",
+                        margin, pos_risk, pos_leverage, pos_size_btc, size_usdt, pos_liq_price, opening_fee
+                    );
+                } else {
+                    println!("⏳ Margen/saldo insuficiente para abrir SHORT.");
+                }
             }
         } else if gemma_action == "CERRAR_SHORT" {
             // Cerrar todos los SHORTS
@@ -599,8 +629,8 @@ Ejemplo de respuesta esperada:
             println!("⏳ Manteniendo posición/Sin acción ejecutada ({}).", gemma_action);
         }
 
-        // Guardar progreso intermedio cada 10 pasos para ver actualización en vivo del dashboard y CSV
-        if (i + 1) % 10 == 0 {
+        // Guardar progreso intermedio cada 1 paso para ver actualización en vivo del dashboard y CSV
+        if (i + 1) % 1 == 0 {
             let bot_equity_series: Vec<f64> = equity_curve.iter().map(|(_, eq, _)| *eq).collect();
             let bh_equity_series: Vec<f64> = equity_curve.iter().map(|(_, _, bh)| *bh).collect();
             let temp_correlation = calculate_correlation(&bot_equity_series, &bh_equity_series);
@@ -701,7 +731,8 @@ Ejemplo de respuesta esperada:
                 temp_recovery_factor,
                 temp_avg_stagnation,
                 temp_max_stagnation,
-                "dashboard.html"
+                "dashboard.html",
+                false
             );
         }
 
@@ -839,7 +870,8 @@ Ejemplo de respuesta esperada:
         final_recovery_factor,
         final_avg_stagnation,
         final_max_stagnation,
-        "dashboard.html"
+        "dashboard.html",
+        true,
     )?;
     println!("🖥️ Dashboard interactivo guardado en 'dashboard.html'");
 
