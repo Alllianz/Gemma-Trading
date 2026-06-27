@@ -1,4 +1,4 @@
-use crate::types::GemmaResponse;
+use crate::types::{GemmaResponse, BoxAction};
 
 pub fn parse_gemma_response(text: &str) -> Option<GemmaResponse> {
     let start_idx = text.find('{')?;
@@ -13,109 +13,61 @@ pub fn parse_gemma_response(text: &str) -> Option<GemmaResponse> {
         return Some(parsed);
     }
     
-    // Si la directa falla, aplicamos parseo robusto campo por campo
+    // Si la directa falla, aplicamos parseo robusto caja por caja
     let v: serde_json::Value = serde_json::from_str(json_substring).ok()?;
     
-    let accion = v.get("accion")
-        .and_then(|a| a.as_str())
-        .map(|s| s.to_string())?; // Requerido
-
     let analisis = v.get("analisis")
         .and_then(|a| a.as_str())
         .map(|s| s.to_string());
 
-    let confianza = v.get("confianza")
-        .and_then(|c| c.as_u64())
-        .map(|n| n as u32);
+    let parse_box = |box_key: &str| -> BoxAction {
+        let box_val = v.get(box_key)
+            .or_else(|| v.get(&box_key.to_uppercase()))
+            .or_else(|| v.get(&box_key.replace("_", "")));
+        
+        let mut accion = "FLAT".to_string();
+        let mut cerrar = false;
+        let mut apalancamiento = None;
+        let mut stop_loss = None;
 
-    let apalancamiento = v.get("apalancamiento")
-        .and_then(|a| a.as_f64());
-
-    let riesgo = v.get("riesgo")
-        .and_then(|r| r.as_f64());
-
-    let cerrar_posiciones = v.get("cerrar_posiciones").and_then(|cp| {
-        if let Some(arr) = cp.as_array() {
-            let mut indices = Vec::new();
-            for item in arr {
-                if let Some(n) = item.as_u64() {
-                    indices.push(n as usize);
-                } else if let Some(s) = item.as_str() {
-                    let clean_s: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
-                    if let Ok(n) = clean_s.parse::<usize>() {
-                        indices.push(n);
-                    }
+        if let Some(b) = box_val {
+            if let Some(act) = b.get("accion").and_then(|a| a.as_str()) {
+                accion = act.to_string();
+            }
+            if let Some(c) = b.get("cerrar") {
+                if let Some(c_bool) = c.as_bool() {
+                    cerrar = c_bool;
+                } else if let Some(c_str) = c.as_str() {
+                    cerrar = c_str.eq_ignore_ascii_case("true") || c_str == "1";
+                } else if let Some(c_num) = c.as_i64() {
+                    cerrar = c_num == 1;
                 }
             }
-            Some(indices)
-        } else {
-            None
-        }
-    });
-
-    let stop_losses = v.get("stop_losses").and_then(|sl| {
-        if let Some(arr) = sl.as_array() {
-            let mut prices = Vec::new();
-            for item in arr {
-                if item.is_null() {
-                    prices.push(None);
-                } else if let Some(n) = item.as_f64() {
-                    prices.push(Some(n));
-                } else if let Some(obj) = item.as_object() {
-                    let price = obj.get("precio")
-                        .or_else(|| obj.get("price"))
-                        .or_else(|| obj.get("val"))
-                        .or_else(|| obj.get("value"))
-                        .or_else(|| obj.get("stop_loss"))
-                        .or_else(|| obj.get("take_profit"))
-                        .and_then(|p| p.as_f64());
-                    prices.push(price);
+            apalancamiento = b.get("apalancamiento").and_then(|a| a.as_f64());
+            stop_loss = b.get("stop_loss").and_then(|s| {
+                if s.is_null() {
+                    None
                 } else {
-                    prices.push(None);
+                    s.as_f64()
                 }
-            }
-            Some(prices)
-        } else {
-            None
+            });
         }
-    });
 
-    let take_profits = v.get("take_profits").and_then(|tp| {
-        if let Some(arr) = tp.as_array() {
-            let mut prices = Vec::new();
-            for item in arr {
-                if item.is_null() {
-                    prices.push(None);
-                } else if let Some(n) = item.as_f64() {
-                    prices.push(Some(n));
-                } else if let Some(obj) = item.as_object() {
-                    let price = obj.get("precio")
-                        .or_else(|| obj.get("price"))
-                        .or_else(|| obj.get("val"))
-                        .or_else(|| obj.get("value"))
-                        .or_else(|| obj.get("take_profit"))
-                        .or_else(|| obj.get("stop_loss"))
-                        .and_then(|p| p.as_f64());
-                    prices.push(price);
-                } else {
-                    prices.push(None);
-                }
-            }
-            Some(prices)
-        } else {
-            None
+        BoxAction {
+            accion,
+            cerrar,
+            apalancamiento,
+            stop_loss,
         }
-    });
+    };
+
+    let lt_box = parse_box("lt_box");
+    let st_box = parse_box("st_box");
 
     Some(GemmaResponse {
         analisis,
-        accion,
-        cerrar_posiciones,
-        stop_losses,
-        take_profits,
-        confianza,
-        apalancamiento,
-        riesgo,
+        lt_box,
+        st_box,
     })
 }
 
@@ -141,8 +93,11 @@ pub async fn call_gemma(
             { "role": "system", "content": system_prompt },
             { "role": "user", "content": user_prompt }
         ],
-        "temperature": 0.2,
-        "max_tokens": 2048
+        "temperature": 0.1,
+        "max_tokens": 1000,
+        "frequency_penalty": 0.5,
+        "presence_penalty": 0.5,
+        "thinking_budget": 150
     });
 
     let resp = client.post(&normalized_url)

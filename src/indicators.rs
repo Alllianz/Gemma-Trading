@@ -1,6 +1,6 @@
 use crate::types::Candle;
 
-fn calculate_ema(candles: &[Candle], i: usize, period: usize) -> f64 {
+pub fn calculate_ema(candles: &[Candle], i: usize, period: usize) -> f64 {
     if candles.is_empty() || i >= candles.len() {
         return 0.0;
     }
@@ -201,7 +201,7 @@ pub fn calculate_indicators(
     let obv = calculate_obv(candles, i);
 
     format!(
-        "EMAs:[{:.1},{:.1},{:.1},{:.1}] SMA20:{:.1} MACD:[{:.2},{:.2},{:.2}] RSI:{:.1} Stoch:{:.1} BB:[{:.1},{:.1},{:.1}] ATR:{:.1}({:.1}%) VWAP:{:.1} OBV:{:.0}",
+        "EMA9:{:.1} EMA21:{:.1} EMA50:{:.1} EMA200:{:.1} SMA20:{:.1} MACD:[{:.2},{:.2},{:.2}] RSI:{:.1} Stoch:{:.1} BB:[{:.1},{:.1},{:.1}] ATR:{:.1}({:.1}%) VWAP:{:.1} OBV:{:.0}",
         ema_9, ema_21, ema_50, ema_200, sma_20, macd_line, macd_signal, macd_hist, rsi, stoch_k, bb_upper, bb_basis, bb_lower, atr, atr_pct, vwap, obv
     )
 }

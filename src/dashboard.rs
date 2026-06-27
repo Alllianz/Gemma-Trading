@@ -1,17 +1,17 @@
 use std::fs::File;
 use std::io::Write;
 
-pub fn save_equity_curve(curve: &[(String, f64, f64)], filename: &str) -> Result<(), std::io::Error> {
+pub fn save_equity_curve(curve: &[(String, f64, f64, String, String)], filename: &str) -> Result<(), std::io::Error> {
     let mut file = File::create(filename)?;
-    writeln!(file, "time,equity,buy_and_hold")?;
-    for (time_str, eq, bh) in curve {
-        writeln!(file, "{},{},{}", time_str, eq, bh)?;
+    writeln!(file, "time,equity,buy_and_hold,action,price")?;
+    for (time_str, eq, bh, act, prc) in curve {
+        writeln!(file, "{},{},{},\"{}\",\"{}\"", time_str, eq, bh, act, prc)?;
     }
     Ok(())
 }
 
 pub fn generate_dashboard(
-    curve: &[(String, f64, f64)],
+    curve: &[(String, f64, f64, String, String)],
     num_compras: usize,
     num_ventas: usize,
     num_liquidaciones: usize,
@@ -26,21 +26,25 @@ pub fn generate_dashboard(
     filename: &str,
     is_completed: bool,
 ) -> Result<(), std::io::Error> {
-    let initial_balance = curve.first().map(|(_, eq, _)| *eq).unwrap_or(0.0);
-    let final_balance = curve.last().map(|(_, eq, _)| *eq).unwrap_or(0.0);
+    let initial_balance = curve.first().map(|(_, eq, _, _, _)| *eq).unwrap_or(0.0);
+    let final_balance = curve.last().map(|(_, eq, _, _, _)| *eq).unwrap_or(0.0);
     let roi = if initial_balance > 0.0 {
         ((final_balance - initial_balance) / initial_balance) * 100.0
     } else {
         0.0
     };
 
-    let labels: Vec<String> = curve.iter().map(|(time, _, _)| time.clone()).collect();
-    let data: Vec<f64> = curve.iter().map(|(_, eq, _)| *eq).collect();
-    let bh_data: Vec<f64> = curve.iter().map(|(_, _, bh)| *bh).collect();
+    let labels: Vec<String> = curve.iter().map(|(time, _, _, _, _)| time.clone()).collect();
+    let data: Vec<f64> = curve.iter().map(|(_, eq, _, _, _)| *eq).collect();
+    let bh_data: Vec<f64> = curve.iter().map(|(_, _, bh, _, _)| *bh).collect();
+    let actions: Vec<String> = curve.iter().map(|(_, _, _, act, _)| act.clone()).collect();
+    let prices: Vec<String> = curve.iter().map(|(_, _, _, _, prc)| prc.clone()).collect();
 
     let labels_json = serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string());
     let data_json = serde_json::to_string(&data).unwrap_or_else(|_| "[]".to_string());
     let bh_data_json = serde_json::to_string(&bh_data).unwrap_or_else(|_| "[]".to_string());
+    let actions_json = serde_json::to_string(&actions).unwrap_or_else(|_| "[]".to_string());
+    let prices_json = serde_json::to_string(&prices).unwrap_or_else(|_| "[]".to_string());
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -189,6 +193,8 @@ pub fn generate_dashboard(
         const labels = {labels_json};
         const dataPoints = {data_json};
         const bhDataPoints = {bh_data_json};
+        const actions = {actions_json};
+        const prices = {prices_json};
 
         const ctx = document.getElementById('equityChart').getContext('2d');
         const gradient = ctx.createLinearGradient(0, 0, 0, 400);
@@ -241,7 +247,18 @@ pub fn generate_dashboard(
                         titleColor: '#e5e5e5',
                         bodyColor: '#f5f5f5',
                         borderColor: '#262626',
-                        borderWidth: 1
+                        borderWidth: 1,
+                        callbacks: {{
+                            afterBody: function(context) {{
+                                const index = context[0].dataIndex;
+                                const action = actions[index];
+                                const price = prices[index];
+                                if (action && action !== "") {{
+                                    return `\\nAcción: ${{action}}\\nPrecio: ${{price}} USDT`;
+                                }}
+                                return '';
+                            }}
+                        }}
                     }}
                 }},
                 scales: {{
@@ -310,7 +327,9 @@ pub fn generate_dashboard(
         max_stagnation = max_stagnation,
         labels_json = labels_json,
         data_json = data_json,
-        bh_data_json = bh_data_json
+        bh_data_json = bh_data_json,
+        actions_json = actions_json,
+        prices_json = prices_json
     );
 
     let mut file = File::create(filename)?;

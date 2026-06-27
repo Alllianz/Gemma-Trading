@@ -72,9 +72,9 @@ pub async fn download_candles(db_path: &str, timeframe: &str) -> Result<(), Box<
             t + 1
         }
         None => {
-            // 2020-04-20 00:00:00 UTC
-            println!("🆕 No se encontraron datos para {}. Iniciando descarga desde el 20-04-2020...", timeframe);
-            chrono::NaiveDate::from_ymd_opt(2020, 4, 20)
+            // 2017-08-17 00:00:00 UTC
+            println!("🆕 No se encontraron datos para {}. Iniciando descarga desde el 17-08-2017...", timeframe);
+            chrono::NaiveDate::from_ymd_opt(2017, 8, 17)
                 .unwrap()
                 .and_hms_opt(0, 0, 0)
                 .unwrap()
@@ -311,5 +311,11 @@ pub fn save_api_config(
 pub fn delete_api_config(db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let conn = Connection::open(db_path)?;
     conn.execute("DELETE FROM api_config", [])?;
+    Ok(())
+}
+
+pub fn clear_candles(db_path: &str, timeframe: &str) -> Result<(), rusqlite::Error> {
+    let conn = Connection::open(db_path)?;
+    conn.execute("DELETE FROM candles WHERE timeframe = ?1", [timeframe])?;
     Ok(())
 }

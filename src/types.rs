@@ -8,6 +8,12 @@ pub enum PositionType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum BoxType {
+    LT,
+    ST,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Position {
     pub position_type: PositionType,
     pub margin: f64,
@@ -15,7 +21,7 @@ pub struct Position {
     pub entry_price: f64,
     pub liquidation_price: f64,
     pub stop_loss: Option<f64>,
-    pub take_profit: Option<f64>,
+    pub box_type: BoxType,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -29,23 +35,21 @@ pub struct Candle {
     pub close_time: i64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct BoxAction {
+    pub accion: String, // "LONG", "SHORT", "FLAT"
+    #[serde(default)]
+    pub cerrar: bool,
+    pub apalancamiento: Option<f64>,
+    pub stop_loss: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GemmaResponse {
     #[serde(default)]
     pub analisis: Option<String>,
-    pub accion: String, // "COMPRAR", "VENDER", "MANTENER"
-    #[serde(default)]
-    pub cerrar_posiciones: Option<Vec<usize>>,
-    #[serde(default)]
-    pub stop_losses: Option<Vec<Option<f64>>>,
-    #[serde(default)]
-    pub take_profits: Option<Vec<Option<f64>>>,
-    #[serde(default)]
-    pub confianza: Option<u32>,
-    #[serde(default)]
-    pub apalancamiento: Option<f64>,
-    #[serde(default)]
-    pub riesgo: Option<f64>,
+    pub lt_box: BoxAction,
+    pub st_box: BoxAction,
 }
 
 #[derive(Debug, Clone)]

@@ -8,7 +8,7 @@ mod backtest;
 mod live;
 
 use std::io::{self, Write};
-use db::{init_api_db, get_llm_config, save_llm_config, download_candles};
+use db::{init_api_db, get_llm_config, save_llm_config, download_candles, clear_candles};
 use backtest::run_backtest;
 use live::trading_en_vivo_menu;
 
@@ -62,7 +62,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     timeframes.push("1h");
                 }
 
+                print!("¿Desea hacer una descarga limpia desde 2017 borrando los datos previos en la base de datos para estas temporalidades? (s/N): ");
+                let _ = io::stdout().flush();
+                let mut clean_input = String::new();
+                let clean_download = if io::stdin().read_line(&mut clean_input).is_ok() {
+                    let trim_input = clean_input.trim().to_lowercase();
+                    trim_input == "s" || trim_input == "si" || trim_input == "sí"
+                } else {
+                    false
+                };
+
                 for tf in timeframes {
+                    if clean_download {
+                        println!("🧹 Limpiando base de datos para la temporalidad {}...", tf);
+                        if let Err(e) = clear_candles(db_path, tf) {
+                            println!("❌ Error al limpiar base de datos: {}", e);
+                        }
+                    }
                     println!("🔄 Descargando/Actualizando velas de {}...", tf);
                     if let Err(e) = download_candles(db_path, tf).await {
                         println!("❌ Error al descargar velas de {}: {}", tf, e);
@@ -128,8 +144,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                print!("Introduce la fecha de inicio del trading para el backtest (AAAA-MM-DD) [Enter para usar 2020-04-20]: ");
+                let _ = io::stdout().flush();
+                let mut start_date_input = String::new();
+                let mut trading_start_date = Some("2020-04-20".to_string());
+                if io::stdin().read_line(&mut start_date_input).is_ok() {
+                    let val = start_date_input.trim().to_string();
+                    if !val.is_empty() {
+                        trading_start_date = Some(val);
+                    }
+                }
+
                 let conf_threshold = if dynamic_risk_leverage { 0 } else { 60 };
-                if let Err(e) = run_backtest(db_path, timeframe, leverage, risk_percent, limit, conf_threshold, verbose, dynamic_risk_leverage).await {
+                if let Err(e) = run_backtest(
+                    db_path,
+                    timeframe,
+                    leverage,
+                    risk_percent,
+                    limit,
+                    conf_threshold,
+                    verbose,
+                    dynamic_risk_leverage,
+                    trading_start_date,
+                ).await {
                     println!("❌ Error en el backtest: {}", e);
                 }
             }
