@@ -155,25 +155,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                print!("Introduce el porcentaje asignado a la cartera Long-Term (LT) (ej. 80 para 80% LT y 20% ST) [Enter para usar 80]: ");
-                let _ = io::stdout().flush();
-                let mut lt_percent_input = String::new();
-                let mut lt_percent = 80.0;
-                if io::stdin().read_line(&mut lt_percent_input).is_ok() {
-                    let val = lt_percent_input.trim();
-                    if !val.is_empty() {
-                        if let Ok(num) = val.parse::<f64>() {
-                            if num >= 0.0 && num <= 100.0 {
-                                lt_percent = num;
-                            } else {
-                                println!("⚠️ Porcentaje inválido, usando 80% por defecto.");
-                            }
-                        } else {
-                            println!("⚠️ Valor inválido, usando 80% por defecto.");
-                        }
-                    }
-                }
-
                 let conf_threshold = if dynamic_risk_leverage { 0 } else { 60 };
                 if let Err(e) = run_backtest(
                     db_path,
@@ -185,7 +166,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     verbose,
                     dynamic_risk_leverage,
                     trading_start_date,
-                    lt_percent,
                 ).await {
                     println!("❌ Error en el backtest: {}", e);
                 }

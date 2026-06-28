@@ -194,7 +194,6 @@ fn execute_box_action(
     num_compras: &mut usize,
     num_ventas: &mut usize,
     step_positions_log: &mut Vec<String>,
-    lt_ratio: f64,
 ) {
     // 1. Procesar cierres (cerrar == true)
     if box_action.cerrar {
@@ -292,10 +291,10 @@ fn execute_box_action(
             };
             
             // Asignación de capital según la caja:
-            // LT: lt_ratio. ST: (1.0 - lt_ratio).
+            // LT: 100% del equity de la cuenta. ST: 100% del equity de la cuenta.
             let box_allocation = match box_type {
-                BoxType::LT => lt_ratio,
-                BoxType::ST => 1.0 - lt_ratio,
+                BoxType::LT => 1.0,
+                BoxType::ST => 1.0,
             };
             
             // Si ya hay una posición en esta caja, la posición adicional debe ser del mismo tamaño exacto (mismo margen)
@@ -378,7 +377,6 @@ pub async fn run_backtest(
     verbose: bool,
     dynamic_risk_leverage: bool,
     trading_start_date: Option<String>,
-    lt_percent: f64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let candles = get_candles(db_path, timeframe, limit)?;
     if candles.is_empty() {
@@ -453,10 +451,8 @@ pub async fn run_backtest(
 
     let initial_price = candles[start_trade_idx].close;
     let initial_balance = 10000.0;
-    let lt_ratio = lt_percent / 100.0;
-    let st_ratio = 1.0 - lt_ratio;
-    let initial_balance_lt = initial_balance * lt_ratio;
-    let initial_balance_st = initial_balance * st_ratio;
+    let initial_balance_lt = initial_balance;
+    let initial_balance_st = initial_balance;
 
     let mut trade_pnls: Vec<f64> = Vec::new();
     let mut trade_pnls_lt: Vec<f64> = Vec::new();
@@ -470,7 +466,7 @@ pub async fn run_backtest(
 INSTRUCTIONS:
 
 Strategy & Capital Allocation (Base Leverage: {}X):
-- Two boxes: {:.0} percent Long-Term (LT) and {:.0} percent Short-Term (ST) of the total account equity. This proportion represents the max margin limit of the boxes, not the volume/size.
+- Two boxes: 100 percent Long-Term (LT) and 100 percent Short-Term (ST) of the total account equity. This proportion represents the max margin limit of the boxes, not the volume/size.
 - Box Independence: The LT and ST boxes are independent trading modules. You can, and should, hold positions in BOTH boxes simultaneously if conditions allow. Do not wait for one box to close or be empty before trading in the other.
 - Leverage: Select between 5.0 and 10.0 for any position (include \"apalancamiento\": X in the box JSON).
 - Add position per Box: You are authorized to open your first position in any box freely. You are authorized to open an ADDITIONAL/SECOND position in the same box ONLY if the existing position in that box has a profit of >= 200 percent ROI (measured relative to its initial MARGIN). Additional positions in a box will always have the exact same size/margin as the first position.
@@ -509,7 +505,7 @@ Example:
     \"stop_loss\": null
   }}
 }}",
-        leverage, lt_percent, 100.0 - lt_percent
+        leverage
     );
 
     let mut active_positions: Vec<Position> = Vec::new();
@@ -792,7 +788,6 @@ What action do you take? Respond strictly in JSON format",
                             &mut num_compras_lt,
                             &mut num_ventas_lt,
                             &mut step_positions_log,
-                            lt_ratio,
                         );
 
                         // Execute ST Box actions
@@ -815,7 +810,6 @@ What action do you take? Respond strictly in JSON format",
                             &mut num_compras_st,
                             &mut num_ventas_st,
                             &mut step_positions_log,
-                            lt_ratio,
                         );
 
                         break;

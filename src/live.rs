@@ -93,7 +93,7 @@ pub async fn run_live_gemma_step(
 INSTRUCTIONS:
 
 Strategy & Capital Allocation (Base Leverage: {}X):
-- Two boxes: 80 percent Long-Term (LT) and 20 percent Short-Term (ST) of the total account equity. This proportion represents the max margin limit of the boxes, not the volume/size.
+- Two boxes: 100 percent Long-Term (LT) and 100 percent Short-Term (ST) of the total account equity. This proportion represents the max margin limit of the boxes, not the volume/size.
 - Box Independence: The LT and ST boxes are independent trading modules. You can, and should, hold positions in BOTH boxes simultaneously if conditions allow. Do not wait for one box to close or be empty before trading in the other.
 - Leverage: Select between 5.0 and 10.0 for any position (include \"apalancamiento\": X in the box JSON).
 - Add position per Box: You are authorized to open your first position in any box freely. You are authorized to open an ADDITIONAL/SECOND position in the same box ONLY if the existing position in that box has a profit of >= 200 percent ROI (measured relative to its initial MARGIN). Additional positions in a box will always have the exact same size/margin as the first position.
@@ -251,7 +251,7 @@ What action do you take? Respond strictly in JSON format",
                             println!("⏳ [LT Box] Acción {:?} recibida, pero ya existe una posición activa.", desired_type);
                         } else {
                             let lt_leverage = parsed.lt_box.apalancamiento.unwrap_or(leverage as f64) as u32;
-                            let margin = equity * 0.8;
+                            let margin = equity;
                             let size_usdt = margin * lt_leverage as f64;
                             match get_ticker_price(client, "BTC-USDT", use_testnet).await {
                                 Ok(price) => {
@@ -302,7 +302,7 @@ What action do you take? Respond strictly in JSON format",
                               println!("⏳ [ST Box] Acción {:?} recibida, pero ya existe una posición activa.", desired_type);
                           } else {
                               let st_leverage = parsed.st_box.apalancamiento.unwrap_or(leverage as f64) as u32;
-                              let margin = equity * 0.2;
+                              let margin = equity;
                               let size_usdt = margin * st_leverage as f64;
                               match get_ticker_price(client, "BTC-USDT", use_testnet).await {
                                   Ok(price) => {
