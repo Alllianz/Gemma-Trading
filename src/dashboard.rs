@@ -19,7 +19,7 @@ pub fn generate_dashboard(
     correlation: f64,
     winrate: f64,
     profit_factor: f64,
-    sharpe_ratio: f64,
+    sortino_ratio: f64,
     recovery_factor: f64,
     avg_stagnation: f64,
     max_stagnation: usize,
@@ -110,8 +110,8 @@ pub fn generate_dashboard(
             </div>
 
             <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
-                <span class="text-neutral-400 text-xs font-medium">Sharpe Ratio</span>
-                <span class="text-lg font-bold text-[#d8b977] mt-1">{sharpe_ratio:.2}</span>
+                <span class="text-neutral-400 text-xs font-medium">Sortino Ratio</span>
+                <span class="text-lg font-bold text-[#d8b977] mt-1">{sortino_ratio:.2}</span>
                 <span class="text-[10px] text-neutral-500 mt-0.5">Anualizado</span>
             </div>
 
@@ -321,7 +321,7 @@ pub fn generate_dashboard(
         correlation = correlation,
         winrate = winrate,
         profit_factor = profit_factor,
-        sharpe_ratio = sharpe_ratio,
+        sortino_ratio = sortino_ratio,
         recovery_factor = recovery_factor,
         avg_stagnation = avg_stagnation,
         max_stagnation = max_stagnation,

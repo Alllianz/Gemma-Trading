@@ -88,27 +88,29 @@ pub async fn run_live_gemma_step(
     }
     
     let system_prompt = format!(
-        "CRITICAL RISK MANAGEMENT:
-- DO NOT use the <think> tag. You are FORBIDDEN from thinking, reasoning, or analyzing.
-- Go straight from the market data to the raw JSON. Do not write a single word of prose.
-- If you violate this rule, the parser will crash. Start your response directly with '{{'.
+        "CRITICAL: DO NOT use any <think> tags. You are strictly FORBIDDEN from reasoning, explaining, or writing thoughts. You must immediately output raw JSON. Your response MUST start with the character '{{' and end with '}}'.
 
 INSTRUCTIONS:
 
 Strategy & Capital Allocation (Base Leverage: {}X):
-- Two boxes: 80 percent Long-Term (LT), 20 percent Short-Term (ST). Can hold 1 LT and 1 ST position simultaneously (e.g. both Long & Short).
+- Two boxes: 80 percent Long-Term (LT) and 20 percent Short-Term (ST) of the total account equity. This proportion represents the max margin limit of the boxes, not the volume/size.
+- Box Independence: The LT and ST boxes are independent trading modules. You can, and should, hold positions in BOTH boxes simultaneously if conditions allow. Do not wait for one box to close or be empty before trading in the other.
 - Leverage: Select between 5.0 and 10.0 for any position (include \"apalancamiento\": X in the box JSON).
-- Add position: You are authorized to open your first LT position freely. You are authorized to open an ADDITIONAL/SECOND LT position only if an existing one has >= 200 percent ROI.
+- Add position per Box: You are authorized to open your first position in any box freely. You are authorized to open an ADDITIONAL/SECOND position in the same box ONLY if the existing position in that box has a profit of >= 200 percent ROI (measured relative to its initial MARGIN). Additional positions in a box will always have the exact same size/margin as the first position.
 
-Trend Priority: 
-- Long-Term (LT) Box: Trade ONLY in the direction of the long-term trend (EMA50 and EMA200).
-- Short-Term (ST) Box: Authorized to trade against the macro trend based on short-term fluctuations.
+Trend Priority & Guidelines: 
+- Long-Term (LT) Box: It is highly suggested to trade in the direction of the long-term trend (EMA100 and EMA200). Long-term buys/sells are suggested when EMA100 is above/below EMA200, though this is a guidance and not a strict blocker.
+- Short-Term (ST) Box (Mid-Term operational mode): Actively trade mid-term trends guided by EMA20 and EMA40.
 
-Position Actions per Box:
+Position Actions & Stop Loss Rules per Box:
 - To open a new trade: set \"accion\" to \"LONG\" or \"SHORT\" and \"cerrar\" to false.
 - To maintain an active trade without changes: set \"accion\" to \"HOLD\" and \"cerrar\" to false.
 - To close an active trade completely: set \"accion\" to \"FLAT\" and \"cerrar\" to true.
 - If a box has no active position and you do not want to open one: set \"accion\" to \"HOLD\", \"cerrar\" to false, and \"stop_loss\" to null.
+- Stop Loss (SL) Rules:
+  * LT Box (Long-Term): Set a wider stop loss below/above EMA200, or use EMA100 as a trailing stop to protect long-term trends.
+  * ST Box (Mid-Term): Set a stop loss below/above EMA40, or use EMA20 as a trailing stop.
+- Trailing Stop: ONLY when you have guaranteed profit (position is strictly in profit compared to the entry price), set the \"stop_loss\" as a Trailing Stop and update it dynamically to the current EMA100/EMA200 (for LT) or EMA20/EMA40 (for ST/Mid-Term) to lock in profits. Do not start trailing or moving the Stop Loss if the position is not in profit.
 
 CRITICAL EXECUTION RULES:
 1. DO NOT use any <think> tags. Do not think, do not reason, do not explain, and do not write any prose. 
@@ -206,9 +208,9 @@ What action do you take? Respond strictly in JSON format",
                     // Execute box actions in live trading
                     let trend_direction_long = {
                         let last_idx = candles.len() - 1;
-                        let ema50 = calculate_ema(&candles, last_idx, 50);
+                        let ema100 = calculate_ema(&candles, last_idx, 100);
                         let ema200 = calculate_ema(&candles, last_idx, 200);
-                        if ema50 >= ema200 { PositionType::Long } else { PositionType::Short }
+                        if ema100 >= ema200 { PositionType::Long } else { PositionType::Short }
                     };
 
                     let get_position_by_type = |p_type: PositionType| -> Option<f64> {
@@ -243,12 +245,13 @@ What action do you take? Respond strictly in JSON format",
                     if lt_action_upper == "LONG" || lt_action_upper == "SHORT" {
                         let desired_type = if lt_action_upper == "LONG" { PositionType::Long } else { PositionType::Short };
                         if desired_type != trend_direction_long {
-                            println!("⏳ [LT Box] Acción {:?} ignorada: No está alineada con la tendencia macro ({:?}).", desired_type, trend_direction_long);
-                        } else if get_position_by_type(desired_type).is_some() {
+                            println!("⚠️ [LT Box Warning] Acción {:?} no coincide con la tendencia macro calculada por EMAs ({:?}). Procediendo de todos modos por sugerencia.", desired_type, trend_direction_long);
+                        }
+                        if get_position_by_type(desired_type).is_some() {
                             println!("⏳ [LT Box] Acción {:?} recibida, pero ya existe una posición activa.", desired_type);
                         } else {
                             let lt_leverage = parsed.lt_box.apalancamiento.unwrap_or(leverage as f64) as u32;
-                            let margin = equity * 0.8 * 0.1;
+                            let margin = equity * 0.8;
                             let size_usdt = margin * lt_leverage as f64;
                             match get_ticker_price(client, "BTC-USDT", use_testnet).await {
                                 Ok(price) => {
@@ -299,7 +302,7 @@ What action do you take? Respond strictly in JSON format",
                               println!("⏳ [ST Box] Acción {:?} recibida, pero ya existe una posición activa.", desired_type);
                           } else {
                               let st_leverage = parsed.st_box.apalancamiento.unwrap_or(leverage as f64) as u32;
-                              let margin = equity * 0.2 * 0.1;
+                              let margin = equity * 0.2;
                               let size_usdt = margin * st_leverage as f64;
                               match get_ticker_price(client, "BTC-USDT", use_testnet).await {
                                   Ok(price) => {

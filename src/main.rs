@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 let mut leverage = 10.0;
-                let mut risk_percent = 10.0;
+                let mut risk_percent = 100.0;
 
                 if !dynamic_risk_leverage {
                     print!("Introduce el apalancamiento a usar (ej. 10): ");
@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    print!("Introduce el porcentaje de capital a arriesgar por operación (ej. 10 para 10%): ");
+                    print!("Introduce el porcentaje de capital a arriesgar por operación (ej. 100 para 100% de la caja): ");
                     let _ = io::stdout().flush();
                     let mut risk_input = String::new();
                     if io::stdin().read_line(&mut risk_input).is_ok() {

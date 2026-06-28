@@ -32,6 +32,134 @@ pub fn calculate_correlation(series_a: &[f64], series_b: &[f64]) -> f64 {
     num / (den_a * den_b).sqrt()
 }
 
+struct AdvancedMetrics {
+    winrate: f64,
+    profit_factor: f64,
+    max_drawdown: f64,
+    recovery_factor: f64,
+    sortino_ratio: f64,
+    max_stagnation: usize,
+    avg_stagnation: f64,
+    correlation: f64,
+}
+
+fn calculate_advanced_metrics(
+    equity_curve: &[(String, f64, f64, String, String)],
+    trade_pnls: &[f64],
+    initial_balance: f64,
+    timeframe: &str,
+) -> AdvancedMetrics {
+    let total_closed_trades = trade_pnls.len();
+    let wins: Vec<f64> = trade_pnls.iter().cloned().filter(|&p| p > 0.0).collect();
+    let losses: Vec<f64> = trade_pnls.iter().cloned().filter(|&p| p <= 0.0).collect();
+    
+    let winrate = if total_closed_trades > 0 {
+        (wins.len() as f64 / total_closed_trades as f64) * 100.0
+    } else {
+        0.0
+    };
+    
+    let gross_profit: f64 = wins.iter().sum();
+    let gross_loss: f64 = losses.iter().sum::<f64>().abs();
+    let profit_factor = if gross_loss > 0.0 {
+        gross_profit / gross_loss
+    } else if gross_profit > 0.0 {
+        99.9
+    } else {
+        0.0
+    };
+
+    // Max Drawdown % & USD
+    let mut peak_eq = initial_balance;
+    let mut max_dd_pct = 0.0;
+    let mut max_dd_usd = 0.0;
+    for (_, eq, _, _, _) in equity_curve {
+        if *eq > peak_eq {
+            peak_eq = *eq;
+        }
+        let dd_pct = (peak_eq - *eq) / peak_eq;
+        if dd_pct > max_dd_pct {
+            max_dd_pct = dd_pct;
+        }
+        let dd_usd = peak_eq - *eq;
+        if dd_usd > max_dd_usd {
+            max_dd_usd = dd_usd;
+        }
+    }
+
+    let current_eq = equity_curve.last().map(|(_, eq, _, _, _)| *eq).unwrap_or(initial_balance);
+    let recovery_factor = if max_dd_usd > 0.0 {
+        (current_eq - initial_balance) / max_dd_usd
+    } else {
+        0.0
+    };
+
+    // Sortino Ratio
+    let returns: Vec<f64> = equity_curve.windows(2).map(|w| (w[1].1 - w[0].1) / w[0].1).collect();
+    let sortino_ratio = if returns.len() > 1 {
+        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+        let downside_sum_sq: f64 = returns.iter()
+            .map(|&r| if r < 0.0 { r.powi(2) } else { 0.0 })
+            .sum();
+        let downside_deviation = (downside_sum_sq / (returns.len() - 1) as f64).sqrt();
+        if downside_deviation > 0.0 {
+            let step_sortino = mean / downside_deviation;
+            let annualization_factor = match timeframe {
+                "1h" => (24.0 * 365.0f64).sqrt(),
+                "4h" => (6.0 * 365.0f64).sqrt(),
+                "1d" => 365.0f64.sqrt(),
+                _ => 1.0,
+            };
+            step_sortino * annualization_factor
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // Stagnation
+    let mut max_eq_stag = initial_balance;
+    let mut current_stagnation = 0;
+    let mut stagnation_periods = Vec::new();
+    for (_, eq, _, _, _) in equity_curve {
+        if *eq >= max_eq_stag {
+            if current_stagnation > 0 {
+                stagnation_periods.push(current_stagnation);
+                current_stagnation = 0;
+            }
+            max_eq_stag = *eq;
+        } else {
+            current_stagnation += 1;
+        }
+    }
+    if current_stagnation > 0 {
+        stagnation_periods.push(current_stagnation);
+    }
+    let max_stagnation = stagnation_periods.iter().max().copied().unwrap_or(0);
+    let avg_stagnation = if !stagnation_periods.is_empty() {
+        stagnation_periods.iter().sum::<usize>() as f64 / stagnation_periods.len() as f64
+    } else {
+        0.0
+    };
+
+    // Correlation
+    let bot_equity_series: Vec<f64> = equity_curve.iter().map(|(_, eq, _, _, _)| *eq).collect();
+    let bh_equity_series: Vec<f64> = equity_curve.iter().map(|(_, _, bh, _, _)| *bh).collect();
+    let correlation = calculate_correlation(&bot_equity_series, &bh_equity_series);
+
+    AdvancedMetrics {
+        winrate,
+        profit_factor,
+        max_drawdown: max_dd_pct,
+        recovery_factor,
+        sortino_ratio,
+        max_stagnation,
+        avg_stagnation,
+        correlation,
+    }
+}
+
 pub fn get_liquidation_percentage(leverage: f64) -> f64 {
     let f = if leverage <= 5.0 { 0.05 }
     else if leverage <= 10.0 { 0.08 }
@@ -60,10 +188,12 @@ fn execute_box_action(
     precio_actual: f64,
     dynamic_risk_leverage: bool,
     trade_pnls: &mut Vec<f64>,
+    trade_pnls_global: &mut Vec<f64>,
     paso_acciones: &mut Vec<String>,
     paso_precios: &mut Vec<String>,
     num_compras: &mut usize,
     num_ventas: &mut usize,
+    step_positions_log: &mut Vec<String>,
 ) {
     // 1. Procesar cierres (cerrar == true)
     if box_action.cerrar {
@@ -83,9 +213,14 @@ fn execute_box_action(
                 *saldo_usdt += return_value;
                 let net_pnl = real_pnl - opening_fee - closing_fee;
                 trade_pnls.push(net_pnl);
-                println!("💰 [{}] POSICIÓN CERRADA: {:?} al precio de {:.2} USDT (Entrada: {:.2} USDT). Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
-                    box_name, pos.position_type, precio_actual, pos.entry_price, return_value, closing_fee, real_pnl
-                );
+                trade_pnls_global.push(net_pnl);
+                
+                let roe = (real_pnl / pos.margin) * 100.0;
+                step_positions_log.push(format!(
+                    "{:?}: {:?}\nEntry Price: {:.2} USDT\nClose Price: {:.2} USDT (CLOSED)\nMargin: {:.2} USDT\nVolume: {:.6} BTC (${:.2})\nPNL: {:.2} USDT (ROE: {:.2}%)\nStop Loss: {}\nFee: {:.2} USDT",
+                    box_type, pos.position_type, pos.entry_price, precio_actual, pos.margin, pos.size_btc, pos.size_btc * precio_actual, real_pnl, roe, pos.stop_loss.map(|s| format!("{:.2} USDT", s)).unwrap_or_else(|| "None".to_string()), opening_fee + closing_fee
+                ));
+
                 paso_acciones.push(format!("CERRAR_{:?}_{:?}", box_type, pos.position_type));
                 paso_precios.push(format!("{:.2}", precio_actual));
                 if pos.position_type == PositionType::Long {
@@ -103,8 +238,21 @@ fn execute_box_action(
     if let Some(sl_val) = box_action.stop_loss {
         for pos in active_positions.iter_mut() {
             if pos.box_type == box_type {
-                pos.stop_loss = Some(sl_val);
-                println!("⚙️ [{}] STOP LOSS ACTUALIZADO: Posición {:?} -> {:.2} USDT", box_name, pos.position_type, sl_val);
+                let final_sl = sl_val;
+                pos.stop_loss = Some(final_sl);
+                
+                let pnl = match pos.position_type {
+                    PositionType::Long => (precio_actual - pos.entry_price) * pos.size_btc,
+                    PositionType::Short => (pos.entry_price - precio_actual) * pos.size_btc,
+                    _ => 0.0,
+                };
+                let roe = (pnl / pos.margin) * 100.0;
+                let volume_usdt = pos.size_btc * precio_actual;
+
+                step_positions_log.push(format!(
+                    "{:?}: {:?}\nEntry Price: {:.2} USDT\nClose Price: 0.00 USDT\nMargin: {:.2} USDT\nVolume: {:.6} BTC (${:.2})\nPNL: {:.2} USDT (ROE: {:.2}%)\nStop Loss: {:.2} USDT\nFee: 0.00 USDT",
+                    box_type, pos.position_type, pos.entry_price, pos.margin, pos.size_btc, volume_usdt, pnl, roe, final_sl
+                ));
             }
         }
     }
@@ -149,7 +297,24 @@ fn execute_box_action(
                 BoxType::ST => 0.20,
             };
             
-            let mut margin = (equity * box_allocation) * (risk_percent / 100.0);
+            // Si ya hay una posición en esta caja, la posición adicional debe ser del mismo tamaño exacto (mismo margen)
+            let mut margin = if let Some(first_pos) = active_positions.iter().find(|p| p.box_type == box_type) {
+                first_pos.margin
+            } else {
+                equity * (risk_percent / 100.0)
+            };
+            
+            // Verificar que no excedamos el límite de capital asignado a la caja (80% para LT, 20% para ST)
+            let current_box_margin: f64 = active_positions.iter()
+                .filter(|p| p.box_type == box_type)
+                .map(|p| p.margin)
+                .sum();
+            
+            let box_limit = equity * box_allocation;
+            if current_box_margin + margin > box_limit {
+                margin = box_limit - current_box_margin;
+            }
+
             let mut size_usdt = margin * box_leverage;
             let mut opening_fee = size_usdt * fee_rate;
 
@@ -169,13 +334,16 @@ fn execute_box_action(
                     _ => precio_actual,
                 };
                 
+                // Aplicar el Stop Loss sugerido por la IA
+                let final_sl = box_action.stop_loss;
+
                 active_positions.push(Position {
                     position_type: desired_type,
                     margin,
                     size_btc: pos_size_btc,
                     entry_price: precio_actual,
                     liquidation_price: pos_liq_price,
-                    stop_loss: box_action.stop_loss,
+                    stop_loss: final_sl,
                     box_type,
                 });
                 
@@ -185,9 +353,11 @@ fn execute_box_action(
                     *num_ventas += 1;
                 }
 
-                println!("🛒 [{}] {:?} ABIERTO: Margen: {:.2} USDT | Apalancamiento: {:.1}x | Tamaño: {:.6} BTC (${:.2}) | Liq: {:.2} USDT | Fee: {:.2} USDT | SL: {:?}",
-                    box_name, desired_type, margin, box_leverage, pos_size_btc, size_usdt, pos_liq_price, opening_fee, box_action.stop_loss
-                );
+                step_positions_log.push(format!(
+                    "{:?}: {:?}\nEntry Price: {:.2} USDT\nClose Price: 0.00 USDT\nMargin: {:.2} USDT\nVolume: {:.6} BTC (${:.2})\nPNL: 0.00 USDT (ROE: 0.00%)\nStop Loss: {}\nFee: {:.2} USDT",
+                    box_type, desired_type, precio_actual, margin, pos_size_btc, size_usdt, final_sl.map(|s| format!("{:.2} USDT", s)).unwrap_or_else(|| "None".to_string()), opening_fee
+                ));
+
                 paso_acciones.push(format!("ABRIR_{:?}_{:?}", box_type, desired_type));
                 paso_precios.push(format!("{:.2}", precio_actual));
             } else {
@@ -262,41 +432,58 @@ pub async fn run_backtest(
     
     let fee_rate = 0.0005; // 0.05% comisión
 
-    let mut num_compras = 0;
-    let mut num_ventas = 0;
     let mut num_liquidaciones = 0;
     let mut peak_equity = 10000.0;
     let mut max_drawdown = 0.0;
 
+    // Contadores específicos por caja
+    let mut num_compras_lt = 0;
+    let mut num_ventas_lt = 0;
+    let mut num_liquidaciones_lt = 0;
+
+    let mut num_compras_st = 0;
+    let mut num_ventas_st = 0;
+    let mut num_liquidaciones_st = 0;
+
     let mut equity_curve: Vec<(String, f64, f64, String, String)> = Vec::new();
+    let mut equity_curve_lt: Vec<(String, f64, f64, String, String)> = Vec::new();
+    let mut equity_curve_st: Vec<(String, f64, f64, String, String)> = Vec::new();
+
     let initial_price = candles[start_trade_idx].close;
     let initial_balance = 10000.0;
+    let initial_balance_lt = 8000.0;
+    let initial_balance_st = 2000.0;
+
     let mut trade_pnls: Vec<f64> = Vec::new();
+    let mut trade_pnls_lt: Vec<f64> = Vec::new();
+    let mut trade_pnls_st: Vec<f64> = Vec::new();
 
     // El umbral de liquidación según la fórmula
 
     let system_prompt = format!(
-        "CRITICAL RISK MANAGEMENT:
-- DO NOT use the <think> tag. You are FORBIDDEN from thinking, reasoning, or analyzing.
-- Go straight from the market data to the raw JSON. Do not write a single word of prose.
-- If you violate this rule, the parser will crash. Start your response directly with '{{'.
+        "CRITICAL: DO NOT use any <think> tags. You are strictly FORBIDDEN from reasoning, explaining, or writing thoughts. You must immediately output raw JSON. Your response MUST start with the character '{{' and end with '}}'.
 
 INSTRUCTIONS:
 
 Strategy & Capital Allocation (Base Leverage: {}X):
-- Two boxes: 80 percent Long-Term (LT), 20 percent Short-Term (ST). Can hold 1 LT and 1 ST position simultaneously (e.g. both Long & Short).
+- Two boxes: 80 percent Long-Term (LT) and 20 percent Short-Term (ST) of the total account equity. This proportion represents the max margin limit of the boxes, not the volume/size.
+- Box Independence: The LT and ST boxes are independent trading modules. You can, and should, hold positions in BOTH boxes simultaneously if conditions allow. Do not wait for one box to close or be empty before trading in the other.
 - Leverage: Select between 5.0 and 10.0 for any position (include \"apalancamiento\": X in the box JSON).
-- Add position: You are authorized to open your first LT position freely. You are authorized to open an ADDITIONAL/SECOND LT position only if an existing one has >= 200 percent ROI.
+- Add position per Box: You are authorized to open your first position in any box freely. You are authorized to open an ADDITIONAL/SECOND position in the same box ONLY if the existing position in that box has a profit of >= 200 percent ROI (measured relative to its initial MARGIN). Additional positions in a box will always have the exact same size/margin as the first position.
 
-Trend Priority: 
-- Long-Term (LT) Box: Trade ONLY in the direction of the long-term trend (EMA50 and EMA200).
-- Short-Term (ST) Box: Authorized to trade against the macro trend based on short-term fluctuations.
+Trend Priority & Guidelines: 
+- Long-Term (LT) Box: It is highly suggested to trade in the direction of the long-term trend (EMA100 and EMA200). Long-term buys/sells are suggested when EMA100 is above/below EMA200, though this is a guidance and not a strict blocker.
+- Short-Term (ST) Box (Mid-Term operational mode): Actively trade mid-term trends guided by EMA20 and EMA40.
 
-Position Actions per Box:
+Position Actions & Stop Loss Rules per Box:
 - To open a new trade: set \"accion\" to \"LONG\" or \"SHORT\" and \"cerrar\" to false.
 - To maintain an active trade without changes: set \"accion\" to \"HOLD\" and \"cerrar\" to false.
 - To close an active trade completely: set \"accion\" to \"FLAT\" and \"cerrar\" to true.
 - If a box has no active position and you do not want to open one: set \"accion\" to \"HOLD\", \"cerrar\" to false, and \"stop_loss\" to null.
+- Stop Loss (SL) Rules:
+  * LT Box (Long-Term): Set a wider stop loss below/above EMA200, or use EMA100 as a trailing stop to protect long-term trends.
+  * ST Box (Mid-Term): Set a stop loss below/above EMA40, or use EMA20 as a trailing stop.
+- Trailing Stop: ONLY when you have guaranteed profit (position is strictly in profit compared to the entry price), set the \"stop_loss\" as a Trailing Stop and update it dynamically to the current EMA100/EMA200 (for LT) or EMA20/EMA40 (for ST/Mid-Term) to lock in profits. Do not start trailing or moving the Stop Loss if the position is not in profit.
 
 CRITICAL EXECUTION RULES:
 1. DO NOT use any <think> tags. Do not think, do not reason, do not explain, and do not write any prose. 
@@ -338,6 +525,7 @@ Example:
 
         let mut paso_acciones = Vec::new();
         let mut paso_precios = Vec::new();
+        let mut step_positions_log = Vec::new();
 
         // 1. Verificar si hay liquidación o ejecución de SL/TP en esta vela (usando high/low)
         let mut closed_indices = Vec::new();
@@ -377,13 +565,28 @@ Example:
         for (idx, close_type, exit_price) in closed_indices {
             let pos = active_positions.remove(idx);
             let opening_fee = pos.size_btc * pos.entry_price * fee_rate;
+            let target_trade_pnls = match pos.box_type {
+                BoxType::LT => &mut trade_pnls_lt,
+                BoxType::ST => &mut trade_pnls_st,
+            };
+            let (target_compras, target_ventas, target_liquidaciones) = match pos.box_type {
+                BoxType::LT => (&mut num_compras_lt, &mut num_ventas_lt, &mut num_liquidaciones_lt),
+                BoxType::ST => (&mut num_compras_st, &mut num_ventas_st, &mut num_liquidaciones_st),
+            };
+
             if close_type == 0 {
-                println!("🔥 LIQUIDACIÓN DETECTADA: La posición {:?} fue liquidada al tocar el precio de {:.2} USDT (Entrada: {:.2} USDT). Se perdió el margen de {:.2} USDT.",
-                    pos.position_type, pos.liquidation_price, pos.entry_price, pos.margin
-                );
+                let closing_fee = pos.size_btc * pos.liquidation_price * fee_rate;
+                *target_liquidaciones += 1;
                 num_liquidaciones += 1;
                 let net_pnl = -pos.margin - opening_fee;
+                target_trade_pnls.push(net_pnl);
                 trade_pnls.push(net_pnl);
+                
+                step_positions_log.push(format!(
+                    "{:?}: {:?}\nEntry Price: {:.2} USDT\nClose Price: {:.2} USDT (LIQUIDATED)\nMargin: {:.2} USDT\nVolume: {:.6} BTC (${:.2})\nPNL: {:.2} USDT (ROE: -100.00%)\nStop Loss: None\nFee: {:.2} USDT",
+                    pos.box_type, pos.position_type, pos.entry_price, pos.liquidation_price, pos.margin, pos.size_btc, pos.size_btc * pos.liquidation_price, -pos.margin, opening_fee + closing_fee
+                ));
+
                 paso_acciones.push(format!("LIQUIDACION_{:?}", pos.position_type));
                 paso_precios.push(format!("{:.2}", pos.liquidation_price));
             } else {
@@ -397,10 +600,21 @@ Example:
                 let return_value = pos.margin + real_pnl - closing_fee;
                 saldo_usdt += return_value;
                 let net_pnl = real_pnl - opening_fee - closing_fee;
+                target_trade_pnls.push(net_pnl);
                 trade_pnls.push(net_pnl);
-                println!("🛑 STOP LOSS EJECUTADO: Posición {:?} cerrada a {:.2} USDT (Entrada: {:.2} USDT). Retorno: {:.2} USDT | Fee: {:.2} USDT | PnL Realizado: {:.2} USDT",
-                    pos.position_type, exit_price, pos.entry_price, return_value, closing_fee, real_pnl
-                );
+                
+                if pos.position_type == PositionType::Long {
+                    *target_ventas += 1;
+                } else {
+                    *target_compras += 1;
+                }
+                
+                let roe = (real_pnl / pos.margin) * 100.0;
+                step_positions_log.push(format!(
+                    "{:?}: {:?}\nEntry Price: {:.2} USDT\nClose Price: {:.2} USDT SL\nMargin: {:.2} USDT\nVolume: {:.6} BTC (${:.2})\nPNL: {:.2} USDT (ROE: {:.2}%)\nStop Loss: {}\nFee: {:.2} USDT",
+                    pos.box_type, pos.position_type, pos.entry_price, exit_price, pos.margin, pos.size_btc, pos.size_btc * exit_price, real_pnl, roe, pos.stop_loss.map(|s| format!("{:.2} USDT", s)).unwrap_or_else(|| "None".to_string()), opening_fee + closing_fee
+                ));
+
                 paso_acciones.push(format!("STOP_LOSS_{:?}", pos.position_type));
                 paso_precios.push(format!("{:.2}", exit_price));
             }
@@ -421,10 +635,7 @@ Example:
 
         let equity = saldo_usdt + total_margins + total_floating_pnl;
 
-        println!("\n=== [Paso {}/{}] {} | Precio Actual: {:.2} USDT | Buy & Hold ($10k): {:.2} USDT ===", i + 1, candles.len(), date_str, precio_actual, 10000.0 * (precio_actual / initial_price));
-        println!("💼 Estado: Saldo: {:.2} USDT | Margen Total: {:.2} USDT | Posiciones Activas: {} | PnL Flotante: {:.2} USDT | Equity: {:.2} USDT",
-            saldo_usdt, total_margins, active_positions.len(), total_floating_pnl, equity
-        );
+        // Reservamos la impresión de Status y Position para después de las acciones de Gemma en este paso.
 
         // 3. Generar la ventana deslizante
         let mut history_str = String::new();
@@ -570,11 +781,13 @@ What action do you take? Respond strictly in JSON format",
                             fee_rate,
                             precio_actual,
                             dynamic_risk_leverage,
+                            &mut trade_pnls_lt,
                             &mut trade_pnls,
                             &mut paso_acciones,
                             &mut paso_precios,
-                            &mut num_compras,
-                            &mut num_ventas,
+                            &mut num_compras_lt,
+                            &mut num_ventas_lt,
+                            &mut step_positions_log,
                         );
 
                         // Execute ST Box actions
@@ -590,11 +803,13 @@ What action do you take? Respond strictly in JSON format",
                             fee_rate,
                             precio_actual,
                             dynamic_risk_leverage,
+                            &mut trade_pnls_st,
                             &mut trade_pnls,
                             &mut paso_acciones,
                             &mut paso_precios,
-                            &mut num_compras,
-                            &mut num_ventas,
+                            &mut num_compras_st,
+                            &mut num_ventas_st,
+                            &mut step_positions_log,
                         );
 
                         break;
@@ -631,9 +846,55 @@ What action do you take? Respond strictly in JSON format",
             println!("🤖 Gemma dice: {}", gemma_analisis);
         }
 
+        // Consolidador e Impresión de logs estructurados solicitados por el usuario
+        for pos in &active_positions {
+            let box_prefix = format!("{:?}:", pos.box_type);
+            if !step_positions_log.iter().any(|log| log.starts_with(&box_prefix)) {
+                let pnl = match pos.position_type {
+                    PositionType::Long => (precio_actual - pos.entry_price) * pos.size_btc,
+                    PositionType::Short => (pos.entry_price - precio_actual) * pos.size_btc,
+                    _ => 0.0,
+                };
+                let roe = (pnl / pos.margin) * 100.0;
+                let volume_usdt = pos.size_btc * precio_actual;
+                step_positions_log.push(format!(
+                    "{:?}: {:?}\nEntry Price: {:.2} USDT\nClose Price: 0.00 USDT\nMargin: {:.2} USDT\nVolume: {:.6} BTC (${:.2})\nPNL: {:.2} USDT (ROE: {:.2}%)\nStop Loss: {}\nFee: 0.00 USDT",
+                    pos.box_type, pos.position_type, pos.entry_price, pos.margin, pos.size_btc, volume_usdt, pnl, roe, pos.stop_loss.map(|s| format!("{:.2} USDT", s)).unwrap_or_else(|| "None".to_string())
+                ));
+            }
+        }
+
+        let step_num = i - start_trade_idx;
+        let step_total = candles.len() - start_trade_idx;
+
+        println!("\nPaso {}/{} - {}", step_num, step_total, date_str.replace(" ", " - "));
+        println!("Precio Actual: {:.2} USDT", precio_actual);
+        println!("Buy & Hold ($10k): {:.2} USDT", 10000.0 * (precio_actual / initial_price));
+        println!("\nStatus:");
+        println!("Equity: {:.2} USDT", equity);
+        println!("Saldo: {:.2} USDT", saldo_usdt);
+        println!("Margen Total: {:.2} USDT", total_margins);
+        println!("Posiciones Activas: {}", active_positions.len());
+        println!("PnL Flotante: {:.2} USDT", total_floating_pnl);
+        println!("\nPosition:");
+        if step_positions_log.is_empty() {
+            println!("No active positions.");
+        } else {
+            for (idx, log) in step_positions_log.iter().enumerate() {
+                if idx > 0 {
+                    println!("");
+                }
+                println!("{}", log);
+            }
+        }
+
         // 6. Recalcular equidad final y guardar curva de equidad con las acciones y precios del paso
         let mut total_floating_pnl = 0.0;
         let mut total_margins = 0.0;
+        
+        let mut floating_pnl_lt = 0.0;
+        let mut floating_pnl_st = 0.0;
+
         for pos in &active_positions {
             let pnl = match pos.position_type {
                 PositionType::Long => (precio_actual - pos.entry_price) * pos.size_btc,
@@ -642,8 +903,19 @@ What action do you take? Respond strictly in JSON format",
             };
             total_floating_pnl += pnl;
             total_margins += pos.margin;
+
+            match pos.box_type {
+                BoxType::LT => floating_pnl_lt += pnl,
+                BoxType::ST => floating_pnl_st += pnl,
+            }
         }
         let equity_final = saldo_usdt + total_margins + total_floating_pnl;
+
+        // Calcular equidad individual de cada caja
+        let realized_pnl_lt = trade_pnls_lt.iter().sum::<f64>();
+        let realized_pnl_st = trade_pnls_st.iter().sum::<f64>();
+        let equity_lt = initial_balance_lt + realized_pnl_lt + floating_pnl_lt;
+        let equity_st = initial_balance_st + realized_pnl_st + floating_pnl_st;
 
         if equity_final > peak_equity {
             peak_equity = equity_final;
@@ -660,120 +932,87 @@ What action do you take? Respond strictly in JSON format",
             date_str.clone(),
             equity_final,
             initial_balance * (candle.close / initial_price),
-            actions_str,
-            prices_str,
+            actions_str.clone(),
+            prices_str.clone(),
+        ));
+
+        equity_curve_lt.push((
+            date_str.clone(),
+            equity_lt,
+            initial_balance_lt * (candle.close / initial_price),
+            actions_str.clone(),
+            prices_str.clone(),
+        ));
+        equity_curve_st.push((
+            date_str.clone(),
+            equity_st,
+            initial_balance_st * (candle.close / initial_price),
+            actions_str.clone(),
+            prices_str.clone(),
         ));
 
         // Guardar progreso intermedio cada 1 paso para ver actualización en vivo del dashboard y CSV
         if (i + 1) % 1 == 0 {
-            let bot_equity_series: Vec<f64> = equity_curve.iter().map(|(_, eq, _, _, _)| *eq).collect();
-            let bh_equity_series: Vec<f64> = equity_curve.iter().map(|(_, _, bh, _, _)| *bh).collect();
-            let temp_correlation = calculate_correlation(&bot_equity_series, &bh_equity_series);
             let _ = save_equity_curve(&equity_curve, "equity_curve.csv");
+            let _ = save_equity_curve(&equity_curve_lt, "equity_curve_lt.csv");
+            let _ = save_equity_curve(&equity_curve_st, "equity_curve_st.csv");
             
-            // Calc temp advanced metrics
-            let total_closed_trades = trade_pnls.len();
-            let wins: Vec<f64> = trade_pnls.iter().cloned().filter(|&p| p > 0.0).collect();
-            let losses: Vec<f64> = trade_pnls.iter().cloned().filter(|&p| p <= 0.0).collect();
-            let temp_winrate = if total_closed_trades > 0 {
-                (wins.len() as f64 / total_closed_trades as f64) * 100.0
-            } else {
-                0.0
-            };
-            let gross_profit: f64 = wins.iter().sum();
-            let gross_loss: f64 = losses.iter().sum::<f64>().abs();
-            let temp_profit_factor = if gross_loss > 0.0 {
-                gross_profit / gross_loss
-            } else if gross_profit > 0.0 {
-                99.9
-            } else {
-                0.0
-            };
-
-            let mut temp_max_dd_usd = 0.0;
-            let mut temp_peak_eq_usd = initial_balance;
-            for (_, eq, _, _, _) in &equity_curve {
-                if *eq > temp_peak_eq_usd {
-                    temp_peak_eq_usd = *eq;
-                }
-                let dd_usd = temp_peak_eq_usd - *eq;
-                if dd_usd > temp_max_dd_usd {
-                    temp_max_dd_usd = dd_usd;
-                }
-            }
-            let current_eq = equity_curve.last().map(|(_, eq, _, _, _)| *eq).unwrap_or(initial_balance);
-            let temp_recovery_factor = if temp_max_dd_usd > 0.0 {
-                (current_eq - initial_balance) / temp_max_dd_usd
-            } else {
-                0.0
-            };
-
-            let returns: Vec<f64> = equity_curve.windows(2).map(|w| (w[1].1 - w[0].1) / w[0].1).collect();
-            let temp_sharpe = if returns.len() > 1 {
-                let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-                let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (returns.len() - 1) as f64;
-                let std_dev = variance.sqrt();
-                if std_dev > 0.0 {
-                    let step_sharpe = mean / std_dev;
-                    let annualization_factor = match timeframe {
-                        "1h" => (24.0 * 365.0f64).sqrt(),
-                        "4h" => (6.0 * 365.0f64).sqrt(),
-                        "1d" => 365.0f64.sqrt(),
-                        _ => 1.0,
-                    };
-                    step_sharpe * annualization_factor
-                } else {
-                    0.0
-                }
-            } else {
-                0.0
-            };
-
-            let mut max_eq_stag = initial_balance;
-            let mut current_stagnation = 0;
-            let mut stagnation_periods = Vec::new();
-            for (_, eq, _, _, _) in &equity_curve {
-                if *eq >= max_eq_stag {
-                    if current_stagnation > 0 {
-                        stagnation_periods.push(current_stagnation);
-                        current_stagnation = 0;
-                    }
-                    max_eq_stag = *eq;
-                } else {
-                    current_stagnation += 1;
-                }
-            }
-            if current_stagnation > 0 {
-                stagnation_periods.push(current_stagnation);
-            }
-            let temp_max_stagnation = stagnation_periods.iter().max().copied().unwrap_or(0);
-            let temp_avg_stagnation = if !stagnation_periods.is_empty() {
-                stagnation_periods.iter().sum::<usize>() as f64 / stagnation_periods.len() as f64
-            } else {
-                0.0
-            };
+            let metrics_global = calculate_advanced_metrics(&equity_curve, &trade_pnls, initial_balance, timeframe);
+            let metrics_lt = calculate_advanced_metrics(&equity_curve_lt, &trade_pnls_lt, initial_balance_lt, timeframe);
+            let metrics_st = calculate_advanced_metrics(&equity_curve_st, &trade_pnls_st, initial_balance_st, timeframe);
 
             let _ = generate_dashboard(
                 &equity_curve,
-                num_compras,
-                num_ventas,
-                num_liquidaciones,
-                max_drawdown,
-                temp_correlation,
-                temp_winrate,
-                temp_profit_factor,
-                temp_sharpe,
-                temp_recovery_factor,
-                temp_avg_stagnation,
-                temp_max_stagnation,
+                num_compras_lt + num_compras_st,
+                num_ventas_lt + num_ventas_st,
+                num_liquidaciones_lt + num_liquidaciones_st,
+                metrics_global.max_drawdown,
+                metrics_global.correlation,
+                metrics_global.winrate,
+                metrics_global.profit_factor,
+                metrics_global.sortino_ratio,
+                metrics_global.recovery_factor,
+                metrics_global.avg_stagnation,
+                metrics_global.max_stagnation,
                 "dashboard.html",
                 false
             );
-        }
 
-        // Wait a bit to avoid overloading LM Studio or too fast output
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
+            let _ = generate_dashboard(
+                &equity_curve_lt,
+                num_compras_lt,
+                num_ventas_lt,
+                num_liquidaciones_lt,
+                metrics_lt.max_drawdown,
+                metrics_lt.correlation,
+                metrics_lt.winrate,
+                metrics_lt.profit_factor,
+                metrics_lt.sortino_ratio,
+                metrics_lt.recovery_factor,
+                metrics_lt.avg_stagnation,
+                metrics_lt.max_stagnation,
+                "LT.html",
+                false
+            );
+
+            let _ = generate_dashboard(
+                &equity_curve_st,
+                num_compras_st,
+                num_ventas_st,
+                num_liquidaciones_st,
+                metrics_st.max_drawdown,
+                metrics_st.correlation,
+                metrics_st.winrate,
+                metrics_st.profit_factor,
+                metrics_st.sortino_ratio,
+                metrics_st.recovery_factor,
+                metrics_st.avg_stagnation,
+                metrics_st.max_stagnation,
+                "ST.html",
+                false
+            );
+        }
+    } // Fin del loop for de velas
 
     // Guardar Equity Curve final
     let mut final_floating_pnl = 0.0;
@@ -788,6 +1027,11 @@ What action do you take? Respond strictly in JSON format",
             _ => 0.0,
         };
         let net_pnl = pnl - opening_fee - closing_fee;
+        
+        match pos.box_type {
+            BoxType::LT => trade_pnls_lt.push(net_pnl),
+            BoxType::ST => trade_pnls_st.push(net_pnl),
+        }
         trade_pnls.push(net_pnl);
         final_floating_pnl += pnl;
         final_margins += pos.margin;
@@ -797,118 +1041,81 @@ What action do you take? Respond strictly in JSON format",
     println!("\n🏁 Backtest completado.");
     println!("📈 Equidad Final: {:.2} USDT", final_equity);
 
-    let bot_equity_series: Vec<f64> = equity_curve.iter().map(|(_, eq, _, _, _)| *eq).collect();
-    let bh_equity_series: Vec<f64> = equity_curve.iter().map(|(_, _, bh, _, _)| *bh).collect();
-    let correlation = calculate_correlation(&bot_equity_series, &bh_equity_series);
-    println!("📈 Correlación con Buy & Hold: {:.4}", correlation);
+    let metrics_global = calculate_advanced_metrics(&equity_curve, &trade_pnls, initial_balance, timeframe);
+    let metrics_lt = calculate_advanced_metrics(&equity_curve_lt, &trade_pnls_lt, initial_balance_lt, timeframe);
+    let metrics_st = calculate_advanced_metrics(&equity_curve_st, &trade_pnls_st, initial_balance_st, timeframe);
 
-    // Calc final metrics
-    let total_closed_trades = trade_pnls.len();
-    let wins: Vec<f64> = trade_pnls.iter().cloned().filter(|&p| p > 0.0).collect();
-    let losses: Vec<f64> = trade_pnls.iter().cloned().filter(|&p| p <= 0.0).collect();
-    let final_winrate = if total_closed_trades > 0 {
-        (wins.len() as f64 / total_closed_trades as f64) * 100.0
-    } else {
-        0.0
-    };
-    let gross_profit: f64 = wins.iter().sum();
-    let gross_loss: f64 = losses.iter().sum::<f64>().abs();
-    let final_profit_factor = if gross_loss > 0.0 {
-        gross_profit / gross_loss
-    } else if gross_profit > 0.0 {
-        99.9
-    } else {
-        0.0
-    };
+    println!("📈 Correlación con Buy & Hold (Global): {:.4}", metrics_global.correlation);
+    println!("📈 Winrate (Global): {:.2}%", metrics_global.winrate);
+    println!("📈 Profit Factor (Global): {:.2}", metrics_global.profit_factor);
+    println!("📈 Sortino Ratio (Global): {:.2}", metrics_global.sortino_ratio);
+    println!("📈 Recovery Factor (Global): {:.2}", metrics_global.recovery_factor);
+    println!("📈 Stagnation (Global): Max {} velas, Promedio {:.2} velas", metrics_global.max_stagnation, metrics_global.avg_stagnation);
 
-    let mut final_max_dd_usd = 0.0;
-    let mut final_peak_eq_usd = initial_balance;
-    for (_, eq, _, _, _) in &equity_curve {
-        if *eq > final_peak_eq_usd {
-            final_peak_eq_usd = *eq;
-        }
-        let dd_usd = final_peak_eq_usd - *eq;
-        if dd_usd > final_max_dd_usd {
-            final_max_dd_usd = dd_usd;
-        }
-    }
-    let final_recovery_factor = if final_max_dd_usd > 0.0 {
-        (final_equity - initial_balance) / final_max_dd_usd
-    } else {
-        0.0
-    };
-
-    let returns: Vec<f64> = equity_curve.windows(2).map(|w| (w[1].1 - w[0].1) / w[0].1).collect();
-    let final_sharpe = if returns.len() > 1 {
-        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-        let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (returns.len() - 1) as f64;
-        let std_dev = variance.sqrt();
-        if std_dev > 0.0 {
-            let step_sharpe = mean / std_dev;
-            let annualization_factor = match timeframe {
-                "1h" => (24.0 * 365.0f64).sqrt(),
-                "4h" => (6.0 * 365.0f64).sqrt(),
-                "1d" => 365.0f64.sqrt(),
-                _ => 1.0,
-            };
-            step_sharpe * annualization_factor
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
-
-    let mut max_eq_stag = initial_balance;
-    let mut current_stagnation = 0;
-    let mut stagnation_periods = Vec::new();
-    for (_, eq, _, _, _) in &equity_curve {
-        if *eq >= max_eq_stag {
-            if current_stagnation > 0 {
-                stagnation_periods.push(current_stagnation);
-                current_stagnation = 0;
-            }
-            max_eq_stag = *eq;
-        } else {
-            current_stagnation += 1;
-        }
-    }
-    if current_stagnation > 0 {
-        stagnation_periods.push(current_stagnation);
-    }
-    let final_max_stagnation = stagnation_periods.iter().max().copied().unwrap_or(0);
-    let final_avg_stagnation = if !stagnation_periods.is_empty() {
-        stagnation_periods.iter().sum::<usize>() as f64 / stagnation_periods.len() as f64
-    } else {
-        0.0
-    };
-
-    println!("📈 Winrate: {:.2}% ({} / {})", final_winrate, wins.len(), total_closed_trades);
-    println!("📈 Profit Factor: {:.2}", final_profit_factor);
-    println!("📈 Sharpe Ratio: {:.2}", final_sharpe);
-    println!("📈 Recovery Factor: {:.2}", final_recovery_factor);
-    println!("📈 Stagnation: Max {} velas, Promedio {:.2} velas", final_max_stagnation, final_avg_stagnation);
+    println!("\n📊 [CAJA LT] Equidad Final: {:.2} USDT | Winrate: {:.2}% | Profit Factor: {:.2}", 
+             equity_curve_lt.last().map(|(_, eq, _, _, _)| *eq).unwrap_or(initial_balance_lt), 
+             metrics_lt.winrate, metrics_lt.profit_factor);
+    println!("📊 [CAJA ST] Equidad Final: {:.2} USDT | Winrate: {:.2}% | Profit Factor: {:.2}", 
+             equity_curve_st.last().map(|(_, eq, _, _, _)| *eq).unwrap_or(initial_balance_st), 
+             metrics_st.winrate, metrics_st.profit_factor);
 
     save_equity_curve(&equity_curve, "equity_curve.csv")?;
-    println!("📊 Curva de equidad guardada en 'equity_curve.csv'");
+    save_equity_curve(&equity_curve_lt, "equity_curve_lt.csv")?;
+    save_equity_curve(&equity_curve_st, "equity_curve_st.csv")?;
+    println!("📊 Curvas de equidad individuales guardadas en 'equity_curve_lt.csv' y 'equity_curve_st.csv'");
     
     generate_dashboard(
         &equity_curve,
-        num_compras,
-        num_ventas,
-        num_liquidaciones,
-        max_drawdown,
-        correlation,
-        final_winrate,
-        final_profit_factor,
-        final_sharpe,
-        final_recovery_factor,
-        final_avg_stagnation,
-        final_max_stagnation,
+        num_compras_lt + num_compras_st,
+        num_ventas_lt + num_ventas_st,
+        num_liquidaciones_lt + num_liquidaciones_st,
+        metrics_global.max_drawdown,
+        metrics_global.correlation,
+        metrics_global.winrate,
+        metrics_global.profit_factor,
+        metrics_global.sortino_ratio,
+        metrics_global.recovery_factor,
+        metrics_global.avg_stagnation,
+        metrics_global.max_stagnation,
         "dashboard.html",
         true,
     )?;
-    println!("🖥️ Dashboard interactivo guardado en 'dashboard.html'");
+
+    generate_dashboard(
+        &equity_curve_lt,
+        num_compras_lt,
+        num_ventas_lt,
+        num_liquidaciones_lt,
+        metrics_lt.max_drawdown,
+        metrics_lt.correlation,
+        metrics_lt.winrate,
+        metrics_lt.profit_factor,
+        metrics_lt.sortino_ratio,
+        metrics_lt.recovery_factor,
+        metrics_lt.avg_stagnation,
+        metrics_lt.max_stagnation,
+        "LT.html",
+        true,
+    )?;
+
+    generate_dashboard(
+        &equity_curve_st,
+        num_compras_st,
+        num_ventas_st,
+        num_liquidaciones_st,
+        metrics_st.max_drawdown,
+        metrics_st.correlation,
+        metrics_st.winrate,
+        metrics_st.profit_factor,
+        metrics_st.sortino_ratio,
+        metrics_st.recovery_factor,
+        metrics_st.avg_stagnation,
+        metrics_st.max_stagnation,
+        "ST.html",
+        true,
+    )?;
+
+    println!("🖥️ Dashboards individuales de cajas guardados en 'LT.html' y 'ST.html'");
 
     Ok(())
 }

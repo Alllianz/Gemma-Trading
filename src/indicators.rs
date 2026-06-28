@@ -180,9 +180,9 @@ pub fn calculate_indicators(
     precio_actual: f64,
 ) -> String {
     // 1. Tendencia
-    let ema_9 = calculate_ema(candles, i, 9);
-    let ema_21 = calculate_ema(candles, i, 21);
-    let ema_50 = calculate_ema(candles, i, 50);
+    let ema_20 = calculate_ema(candles, i, 20);
+    let ema_40 = calculate_ema(candles, i, 40);
+    let ema_100 = calculate_ema(candles, i, 100);
     let ema_200 = calculate_ema(candles, i, 200);
     let sma_20 = calculate_sma(candles, i, 20);
     let (macd_line, macd_signal, macd_hist) = calculate_macd(candles, i);
@@ -201,7 +201,7 @@ pub fn calculate_indicators(
     let obv = calculate_obv(candles, i);
 
     format!(
-        "EMA9:{:.1} EMA21:{:.1} EMA50:{:.1} EMA200:{:.1} SMA20:{:.1} MACD:[{:.2},{:.2},{:.2}] RSI:{:.1} Stoch:{:.1} BB:[{:.1},{:.1},{:.1}] ATR:{:.1}({:.1}%) VWAP:{:.1} OBV:{:.0}",
-        ema_9, ema_21, ema_50, ema_200, sma_20, macd_line, macd_signal, macd_hist, rsi, stoch_k, bb_upper, bb_basis, bb_lower, atr, atr_pct, vwap, obv
+        "EMA20:{:.1} EMA40:{:.1} EMA100:{:.1} EMA200:{:.1} SMA20:{:.1} MACD:[{:.2},{:.2},{:.2}] RSI:{:.1} Stoch:{:.1} BB:[{:.1},{:.1},{:.1}] ATR:{:.1}({:.1}%) VWAP:{:.1} OBV:{:.0}",
+        ema_20, ema_40, ema_100, ema_200, sma_20, macd_line, macd_signal, macd_hist, rsi, stoch_k, bb_upper, bb_basis, bb_lower, atr, atr_pct, vwap, obv
     )
 }

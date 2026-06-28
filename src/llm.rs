@@ -97,7 +97,8 @@ pub async fn call_gemma(
         "max_tokens": 1000,
         "frequency_penalty": 0.5,
         "presence_penalty": 0.5,
-        "thinking_budget": 150
+        "thinking_budget": 150,
+        "stop": ["<think>", "\n*"]
     });
 
     let resp = client.post(&normalized_url)
