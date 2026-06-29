@@ -9,7 +9,6 @@ pub enum PositionType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BoxType {
-    LT,
     ST,
 }
 
@@ -48,7 +47,6 @@ pub struct BoxAction {
 pub struct GemmaResponse {
     #[serde(default)]
     pub analisis: Option<String>,
-    pub lt_box: BoxAction,
     pub st_box: BoxAction,
 }
 

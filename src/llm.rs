@@ -61,12 +61,10 @@ pub fn parse_gemma_response(text: &str) -> Option<GemmaResponse> {
         }
     };
 
-    let lt_box = parse_box("lt_box");
     let st_box = parse_box("st_box");
 
     Some(GemmaResponse {
         analisis,
-        lt_box,
         st_box,
     })
 }
@@ -94,6 +92,7 @@ pub async fn call_gemma(
             { "role": "user", "content": user_prompt }
         ],
         "temperature": 0.1,
+        "seed": 42,
         "max_tokens": 1000,
         "frequency_penalty": 0.5,
         "presence_penalty": 0.5,

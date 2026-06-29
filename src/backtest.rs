@@ -188,12 +188,12 @@ fn execute_box_action(
     precio_actual: f64,
     dynamic_risk_leverage: bool,
     trade_pnls: &mut Vec<f64>,
-    trade_pnls_global: &mut Vec<f64>,
     paso_acciones: &mut Vec<String>,
     paso_precios: &mut Vec<String>,
     num_compras: &mut usize,
     num_ventas: &mut usize,
     step_positions_log: &mut Vec<String>,
+    directional_score: &mut i32,
 ) {
     // 1. Procesar cierres (cerrar == true)
     if box_action.cerrar {
@@ -213,7 +213,17 @@ fn execute_box_action(
                 *saldo_usdt += return_value;
                 let net_pnl = real_pnl - opening_fee - closing_fee;
                 trade_pnls.push(net_pnl);
-                trade_pnls_global.push(net_pnl);
+
+                let hit_direction = match pos.position_type {
+                    PositionType::Long => precio_actual > pos.entry_price,
+                    PositionType::Short => precio_actual < pos.entry_price,
+                    _ => false,
+                };
+                if hit_direction {
+                    *directional_score += 10;
+                } else {
+                    *directional_score -= 10;
+                }
                 
                 let roe = (real_pnl / pos.margin) * 100.0;
                 step_positions_log.push(format!(
@@ -290,10 +300,8 @@ fn execute_box_action(
                 leverage
             };
             
-            // Asignación de capital según la caja:
-            // LT: 100% del equity de la cuenta. ST: 100% del equity de la cuenta.
+            // Asignación de capital según la caja: ST: 100% del equity de la cuenta.
             let box_allocation = match box_type {
-                BoxType::LT => 1.0,
                 BoxType::ST => 1.0,
             };
             
@@ -437,26 +445,18 @@ pub async fn run_backtest(
     let mut max_drawdown = 0.0;
 
     // Contadores específicos por caja
-    let mut num_compras_lt = 0;
-    let mut num_ventas_lt = 0;
-    let mut num_liquidaciones_lt = 0;
-
     let mut num_compras_st = 0;
     let mut num_ventas_st = 0;
     let mut num_liquidaciones_st = 0;
 
+    let mut directional_score = 0;
+
     let mut equity_curve: Vec<(String, f64, f64, String, String)> = Vec::new();
-    let mut equity_curve_lt: Vec<(String, f64, f64, String, String)> = Vec::new();
-    let mut equity_curve_st: Vec<(String, f64, f64, String, String)> = Vec::new();
 
     let initial_price = candles[start_trade_idx].close;
     let initial_balance = 10000.0;
-    let initial_balance_lt = initial_balance;
-    let initial_balance_st = initial_balance;
 
     let mut trade_pnls: Vec<f64> = Vec::new();
-    let mut trade_pnls_lt: Vec<f64> = Vec::new();
-    let mut trade_pnls_st: Vec<f64> = Vec::new();
 
     // El umbral de liquidación según la fórmula
 
@@ -466,24 +466,24 @@ pub async fn run_backtest(
 INSTRUCTIONS:
 
 Strategy & Capital Allocation (Base Leverage: {}X):
-- Two boxes: 100 percent Long-Term (LT) and 100 percent Short-Term (ST) of the total account equity. This proportion represents the max margin limit of the boxes, not the volume/size.
-- Box Independence: The LT and ST boxes are independent trading modules. You can, and should, hold positions in BOTH boxes simultaneously if conditions allow. Do not wait for one box to close or be empty before trading in the other.
+- Short-Term (ST) Box (Mid-Term operational mode): 100 percent of the total account equity. This proportion represents the max margin limit of the box, not the volume/size.
 - Leverage: Select between 5.0 and 10.0 for any position (include \"apalancamiento\": X in the box JSON).
-- Add position per Box: You are authorized to open your first position in any box freely. You are authorized to open an ADDITIONAL/SECOND position in the same box ONLY if the existing position in that box has a profit of >= 200 percent ROI (measured relative to its initial MARGIN). Additional positions in a box will always have the exact same size/margin as the first position.
+- Add position: You are authorized to open your first position freely. You are authorized to open an ADDITIONAL/SECOND position ONLY if the existing position has a profit of >= 200 percent ROI (measured relative to its initial MARGIN). Additional positions will always have the exact same size/margin as the first position.
 
 Trend Priority & Guidelines: 
-- Long-Term (LT) Box: It is highly suggested to trade in the direction of the long-term trend (EMA100 and EMA200). Long-term buys/sells are suggested when EMA100 is above/below EMA200, though this is a guidance and not a strict blocker.
 - Short-Term (ST) Box (Mid-Term operational mode): Actively trade mid-term trends guided by EMA20 and EMA40.
 
-Position Actions & Stop Loss Rules per Box:
+Position Actions & Stop Loss Rules:
 - To open a new trade: set \"accion\" to \"LONG\" or \"SHORT\" and \"cerrar\" to false.
 - To maintain an active trade without changes: set \"accion\" to \"HOLD\" and \"cerrar\" to false.
 - To close an active trade completely: set \"accion\" to \"FLAT\" and \"cerrar\" to true.
-- If a box has no active position and you do not want to open one: set \"accion\" to \"HOLD\", \"cerrar\" to false, and \"stop_loss\" to null.
+- If the box has no active position and you do not want to open one: set \"accion\" to \"HOLD\", \"cerrar\" to false, and \"stop_loss\" to null.
 - Stop Loss (SL) Rules:
-  * LT Box (Long-Term): Set a wider stop loss below/above EMA200, or use EMA100 as a trailing stop to protect long-term trends.
   * ST Box (Mid-Term): Set a stop loss below/above EMA40, or use EMA20 as a trailing stop.
-- Trailing Stop: ONLY when you have guaranteed profit (position is strictly in profit compared to the entry price), set the \"stop_loss\" as a Trailing Stop and update it dynamically to the current EMA100/EMA200 (for LT) or EMA20/EMA40 (for ST/Mid-Term) to lock in profits. Do not start trailing or moving the Stop Loss if the position is not in profit.
+- Trailing Stop: ONLY when you have guaranteed profit (position is strictly in profit compared to the entry price), set the \"stop_loss\" as a Trailing Stop and update it dynamically to the current EMA20/EMA40 (for ST/Mid-Term) to lock in profits. Do not start trailing or moving the Stop Loss if the position is not in profit.
+
+Scoring System (Directional Accuracy):
+- Tu objetivo principal es maximizar tu \"Directional Accuracy Score\". Cada operación que se cierre en la dirección correcta te sumará +10 puntos. Cada operación que se cierre en la dirección incorrecta te restará -10 puntos. Utiliza este feedback para corregir tus predicciones direccionales.
 
 CRITICAL EXECUTION RULES:
 1. DO NOT use any <think> tags. Do not think, do not reason, do not explain, and do not write any prose. 
@@ -492,12 +492,6 @@ CRITICAL EXECUTION RULES:
 
 Example:
 {{
-  \"lt_box\": {{
-    \"accion\": \"HOLD\",
-    \"cerrar\": false,
-    \"apalancamiento\": 5.0,
-    \"stop_loss\": null
-  }},
   \"st_box\": {{
     \"accion\": \"HOLD\",
     \"cerrar\": false,
@@ -565,14 +559,8 @@ Example:
         for (idx, close_type, exit_price) in closed_indices {
             let pos = active_positions.remove(idx);
             let opening_fee = pos.size_btc * pos.entry_price * fee_rate;
-            let target_trade_pnls = match pos.box_type {
-                BoxType::LT => &mut trade_pnls_lt,
-                BoxType::ST => &mut trade_pnls_st,
-            };
-            let (target_compras, target_ventas, target_liquidaciones) = match pos.box_type {
-                BoxType::LT => (&mut num_compras_lt, &mut num_ventas_lt, &mut num_liquidaciones_lt),
-                BoxType::ST => (&mut num_compras_st, &mut num_ventas_st, &mut num_liquidaciones_st),
-            };
+            let target_trade_pnls = &mut trade_pnls;
+            let (target_compras, target_ventas, target_liquidaciones) = (&mut num_compras_st, &mut num_ventas_st, &mut num_liquidaciones_st);
 
             if close_type == 0 {
                 let closing_fee = pos.size_btc * pos.liquidation_price * fee_rate;
@@ -581,6 +569,8 @@ Example:
                 let net_pnl = -pos.margin - opening_fee;
                 target_trade_pnls.push(net_pnl);
                 trade_pnls.push(net_pnl);
+                
+                directional_score -= 10; // Liquidación siempre es un fallo direccional
                 
                 step_positions_log.push(format!(
                     "{:?}: {:?}\nEntry Price: {:.2} USDT\nClose Price: {:.2} USDT (LIQUIDATED)\nMargin: {:.2} USDT\nVolume: {:.6} BTC (${:.2})\nPNL: {:.2} USDT (ROE: -100.00%)\nStop Loss: None\nFee: {:.2} USDT",
@@ -602,6 +592,17 @@ Example:
                 let net_pnl = real_pnl - opening_fee - closing_fee;
                 target_trade_pnls.push(net_pnl);
                 trade_pnls.push(net_pnl);
+                
+                let hit_direction = match pos.position_type {
+                    PositionType::Long => exit_price > pos.entry_price,
+                    PositionType::Short => exit_price < pos.entry_price,
+                    _ => false,
+                };
+                if hit_direction {
+                    directional_score += 10;
+                } else {
+                    directional_score -= 10;
+                }
                 
                 if pos.position_type == PositionType::Long {
                     *target_ventas += 1;
@@ -737,13 +738,14 @@ Free balance (not in margin): {:.2} USDT
 Total Equity: {:.2} USDT
 Leverage: {:.1}x
 Risk parameters: Max % risk per trade: {}%
+Directional Accuracy Score: {}
 Active Positions & Pending Orders (SL):
 {}
 Recent trades history (Realized PnLs of closed trades):
 {:?}
 
 What action do you take? Respond strictly in JSON format",
-            precio_actual, history_str, num_liquidaciones, indicators_str, saldo_usdt, equity, leverage, risk_percent, positions_str, trade_pnls.iter().rev().take(5).collect::<Vec<_>>()
+            precio_actual, history_str, num_liquidaciones, indicators_str, saldo_usdt, equity, leverage, risk_percent, directional_score, positions_str, trade_pnls.iter().rev().take(5).collect::<Vec<_>>()
         );
 
         let mut retries = 3;
@@ -768,28 +770,6 @@ What action do you take? Respond strictly in JSON format",
                             gemma_analisis = ans.clone();
                         }
 
-                        // Execute LT Box actions
-                        execute_box_action(
-                            "LT_BOX",
-                            &parsed.lt_box,
-                            BoxType::LT,
-                            &mut saldo_usdt,
-                            &mut active_positions,
-                            equity,
-                            risk_percent,
-                            leverage,
-                            fee_rate,
-                            precio_actual,
-                            dynamic_risk_leverage,
-                            &mut trade_pnls_lt,
-                            &mut trade_pnls,
-                            &mut paso_acciones,
-                            &mut paso_precios,
-                            &mut num_compras_lt,
-                            &mut num_ventas_lt,
-                            &mut step_positions_log,
-                        );
-
                         // Execute ST Box actions
                         execute_box_action(
                             "ST_BOX",
@@ -803,13 +783,13 @@ What action do you take? Respond strictly in JSON format",
                             fee_rate,
                             precio_actual,
                             dynamic_risk_leverage,
-                            &mut trade_pnls_st,
                             &mut trade_pnls,
                             &mut paso_acciones,
                             &mut paso_precios,
                             &mut num_compras_st,
                             &mut num_ventas_st,
                             &mut step_positions_log,
+                            &mut directional_score,
                         );
 
                         break;
@@ -891,9 +871,6 @@ What action do you take? Respond strictly in JSON format",
         // 6. Recalcular equidad final y guardar curva de equidad con las acciones y precios del paso
         let mut total_floating_pnl = 0.0;
         let mut total_margins = 0.0;
-        
-        let mut floating_pnl_lt = 0.0;
-        let mut floating_pnl_st = 0.0;
 
         for pos in &active_positions {
             let pnl = match pos.position_type {
@@ -903,19 +880,8 @@ What action do you take? Respond strictly in JSON format",
             };
             total_floating_pnl += pnl;
             total_margins += pos.margin;
-
-            match pos.box_type {
-                BoxType::LT => floating_pnl_lt += pnl,
-                BoxType::ST => floating_pnl_st += pnl,
-            }
         }
         let equity_final = saldo_usdt + total_margins + total_floating_pnl;
-
-        // Calcular equidad individual de cada caja
-        let realized_pnl_lt = trade_pnls_lt.iter().sum::<f64>();
-        let realized_pnl_st = trade_pnls_st.iter().sum::<f64>();
-        let equity_lt = initial_balance_lt + realized_pnl_lt + floating_pnl_lt;
-        let equity_st = initial_balance_st + realized_pnl_st + floating_pnl_st;
 
         if equity_final > peak_equity {
             peak_equity = equity_final;
@@ -936,36 +902,17 @@ What action do you take? Respond strictly in JSON format",
             prices_str.clone(),
         ));
 
-        equity_curve_lt.push((
-            date_str.clone(),
-            equity_lt,
-            initial_balance_lt * (candle.close / initial_price),
-            actions_str.clone(),
-            prices_str.clone(),
-        ));
-        equity_curve_st.push((
-            date_str.clone(),
-            equity_st,
-            initial_balance_st * (candle.close / initial_price),
-            actions_str.clone(),
-            prices_str.clone(),
-        ));
-
         // Guardar progreso intermedio cada 1 paso para ver actualización en vivo del dashboard y CSV
         if (i + 1) % 1 == 0 {
             let _ = save_equity_curve(&equity_curve, "equity_curve.csv");
-            let _ = save_equity_curve(&equity_curve_lt, "equity_curve_lt.csv");
-            let _ = save_equity_curve(&equity_curve_st, "equity_curve_st.csv");
             
             let metrics_global = calculate_advanced_metrics(&equity_curve, &trade_pnls, initial_balance, timeframe);
-            let metrics_lt = calculate_advanced_metrics(&equity_curve_lt, &trade_pnls_lt, initial_balance_lt, timeframe);
-            let metrics_st = calculate_advanced_metrics(&equity_curve_st, &trade_pnls_st, initial_balance_st, timeframe);
 
             let _ = generate_dashboard(
                 &equity_curve,
-                num_compras_lt + num_compras_st,
-                num_ventas_lt + num_ventas_st,
-                num_liquidaciones_lt + num_liquidaciones_st,
+                num_compras_st,
+                num_ventas_st,
+                num_liquidaciones_st,
                 metrics_global.max_drawdown,
                 metrics_global.correlation,
                 metrics_global.winrate,
@@ -975,40 +922,6 @@ What action do you take? Respond strictly in JSON format",
                 metrics_global.avg_stagnation,
                 metrics_global.max_stagnation,
                 "dashboard.html",
-                false
-            );
-
-            let _ = generate_dashboard(
-                &equity_curve_lt,
-                num_compras_lt,
-                num_ventas_lt,
-                num_liquidaciones_lt,
-                metrics_lt.max_drawdown,
-                metrics_lt.correlation,
-                metrics_lt.winrate,
-                metrics_lt.profit_factor,
-                metrics_lt.sortino_ratio,
-                metrics_lt.recovery_factor,
-                metrics_lt.avg_stagnation,
-                metrics_lt.max_stagnation,
-                "LT.html",
-                false
-            );
-
-            let _ = generate_dashboard(
-                &equity_curve_st,
-                num_compras_st,
-                num_ventas_st,
-                num_liquidaciones_st,
-                metrics_st.max_drawdown,
-                metrics_st.correlation,
-                metrics_st.winrate,
-                metrics_st.profit_factor,
-                metrics_st.sortino_ratio,
-                metrics_st.recovery_factor,
-                metrics_st.avg_stagnation,
-                metrics_st.max_stagnation,
-                "ST.html",
                 false
             );
         }
@@ -1028,10 +941,6 @@ What action do you take? Respond strictly in JSON format",
         };
         let net_pnl = pnl - opening_fee - closing_fee;
         
-        match pos.box_type {
-            BoxType::LT => trade_pnls_lt.push(net_pnl),
-            BoxType::ST => trade_pnls_st.push(net_pnl),
-        }
         trade_pnls.push(net_pnl);
         final_floating_pnl += pnl;
         final_margins += pos.margin;
@@ -1042,8 +951,6 @@ What action do you take? Respond strictly in JSON format",
     println!("📈 Equidad Final: {:.2} USDT", final_equity);
 
     let metrics_global = calculate_advanced_metrics(&equity_curve, &trade_pnls, initial_balance, timeframe);
-    let metrics_lt = calculate_advanced_metrics(&equity_curve_lt, &trade_pnls_lt, initial_balance_lt, timeframe);
-    let metrics_st = calculate_advanced_metrics(&equity_curve_st, &trade_pnls_st, initial_balance_st, timeframe);
 
     println!("📈 Correlación con Buy & Hold (Global): {:.4}", metrics_global.correlation);
     println!("📈 Winrate (Global): {:.2}%", metrics_global.winrate);
@@ -1052,23 +959,13 @@ What action do you take? Respond strictly in JSON format",
     println!("📈 Recovery Factor (Global): {:.2}", metrics_global.recovery_factor);
     println!("📈 Stagnation (Global): Max {} velas, Promedio {:.2} velas", metrics_global.max_stagnation, metrics_global.avg_stagnation);
 
-    println!("\n📊 [CAJA LT] Equidad Final: {:.2} USDT | Winrate: {:.2}% | Profit Factor: {:.2}", 
-             equity_curve_lt.last().map(|(_, eq, _, _, _)| *eq).unwrap_or(initial_balance_lt), 
-             metrics_lt.winrate, metrics_lt.profit_factor);
-    println!("📊 [CAJA ST] Equidad Final: {:.2} USDT | Winrate: {:.2}% | Profit Factor: {:.2}", 
-             equity_curve_st.last().map(|(_, eq, _, _, _)| *eq).unwrap_or(initial_balance_st), 
-             metrics_st.winrate, metrics_st.profit_factor);
-
     save_equity_curve(&equity_curve, "equity_curve.csv")?;
-    save_equity_curve(&equity_curve_lt, "equity_curve_lt.csv")?;
-    save_equity_curve(&equity_curve_st, "equity_curve_st.csv")?;
-    println!("📊 Curvas de equidad individuales guardadas en 'equity_curve_lt.csv' y 'equity_curve_st.csv'");
     
     generate_dashboard(
         &equity_curve,
-        num_compras_lt + num_compras_st,
-        num_ventas_lt + num_ventas_st,
-        num_liquidaciones_lt + num_liquidaciones_st,
+        num_compras_st,
+        num_ventas_st,
+        num_liquidaciones_st,
         metrics_global.max_drawdown,
         metrics_global.correlation,
         metrics_global.winrate,
@@ -1080,42 +977,6 @@ What action do you take? Respond strictly in JSON format",
         "dashboard.html",
         true,
     )?;
-
-    generate_dashboard(
-        &equity_curve_lt,
-        num_compras_lt,
-        num_ventas_lt,
-        num_liquidaciones_lt,
-        metrics_lt.max_drawdown,
-        metrics_lt.correlation,
-        metrics_lt.winrate,
-        metrics_lt.profit_factor,
-        metrics_lt.sortino_ratio,
-        metrics_lt.recovery_factor,
-        metrics_lt.avg_stagnation,
-        metrics_lt.max_stagnation,
-        "LT.html",
-        true,
-    )?;
-
-    generate_dashboard(
-        &equity_curve_st,
-        num_compras_st,
-        num_ventas_st,
-        num_liquidaciones_st,
-        metrics_st.max_drawdown,
-        metrics_st.correlation,
-        metrics_st.winrate,
-        metrics_st.profit_factor,
-        metrics_st.sortino_ratio,
-        metrics_st.recovery_factor,
-        metrics_st.avg_stagnation,
-        metrics_st.max_stagnation,
-        "ST.html",
-        true,
-    )?;
-
-    println!("🖥️ Dashboards individuales de cajas guardados en 'LT.html' y 'ST.html'");
 
     Ok(())
 }

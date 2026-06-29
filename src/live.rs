@@ -10,7 +10,7 @@ use crate::bingx::{
     test_api_connection, get_stable_balance, get_account_details, get_open_positions,
     get_ticker_price, set_leverage, open_market_order
 };
-use crate::indicators::{calculate_indicators, calculate_ema};
+use crate::indicators::{calculate_indicators};
 
 pub async fn run_live_gemma_step(
     db_path: &str,
@@ -20,7 +20,8 @@ pub async fn run_live_gemma_step(
     api_secret: &str,
     leverage: u32,
     use_testnet: bool,
-    _confidence_threshold: u32,
+    directional_score: &mut i32,
+    last_position: &mut Option<(PositionType, f64)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Fetch latest 500 candles from DB (to pre-warm indicators)
     let candles = get_latest_candles(db_path, timeframe, 500)?;
@@ -59,6 +60,32 @@ pub async fn run_live_gemma_step(
             break;
         }
     }
+
+    // Detectar cierre de posición para el scoring direccional
+    if let Some((last_type, last_entry)) = last_position {
+        let is_closed = position_type == PositionType::None || position_type != *last_type;
+        if is_closed {
+            let hit_direction = match last_type {
+                PositionType::Long => precio_actual > *last_entry,
+                PositionType::Short => precio_actual < *last_entry,
+                _ => false,
+            };
+            if hit_direction {
+                *directional_score += 10;
+                println!("📈 [Scoring] Posición anterior {:?} CERRADA con acierto direccional. Score actual: {}", last_type, directional_score);
+            } else {
+                *directional_score -= 10;
+                println!("📉 [Scoring] Posición anterior {:?} CERRADA con desacierto direccional. Score actual: {}", last_type, directional_score);
+            }
+        }
+    }
+    
+    // Actualizar la última posición
+    if position_type != PositionType::None {
+        *last_position = Some((position_type, precio_entrada));
+    } else {
+        *last_position = None;
+    }
     
     // Available margin is what we can use to open new positions
     let saldo_usdt = account.available_margin;
@@ -93,24 +120,24 @@ pub async fn run_live_gemma_step(
 INSTRUCTIONS:
 
 Strategy & Capital Allocation (Base Leverage: {}X):
-- Two boxes: 100 percent Long-Term (LT) and 100 percent Short-Term (ST) of the total account equity. This proportion represents the max margin limit of the boxes, not the volume/size.
-- Box Independence: The LT and ST boxes are independent trading modules. You can, and should, hold positions in BOTH boxes simultaneously if conditions allow. Do not wait for one box to close or be empty before trading in the other.
+- Short-Term (ST) Box (Mid-Term operational mode): 100 percent of the total account equity. This proportion represents the max margin limit of the box, not the volume/size.
 - Leverage: Select between 5.0 and 10.0 for any position (include \"apalancamiento\": X in the box JSON).
-- Add position per Box: You are authorized to open your first position in any box freely. You are authorized to open an ADDITIONAL/SECOND position in the same box ONLY if the existing position in that box has a profit of >= 200 percent ROI (measured relative to its initial MARGIN). Additional positions in a box will always have the exact same size/margin as the first position.
+- Add position: You are authorized to open your first position freely. You are authorized to open an ADDITIONAL/SECOND position ONLY if the existing position has a profit of >= 200 percent ROI (measured relative to its initial MARGIN). Additional positions will always have the exact same size/margin as the first position.
 
 Trend Priority & Guidelines: 
-- Long-Term (LT) Box: It is highly suggested to trade in the direction of the long-term trend (EMA100 and EMA200). Long-term buys/sells are suggested when EMA100 is above/below EMA200, though this is a guidance and not a strict blocker.
 - Short-Term (ST) Box (Mid-Term operational mode): Actively trade mid-term trends guided by EMA20 and EMA40.
 
-Position Actions & Stop Loss Rules per Box:
+Position Actions & Stop Loss Rules:
 - To open a new trade: set \"accion\" to \"LONG\" or \"SHORT\" and \"cerrar\" to false.
 - To maintain an active trade without changes: set \"accion\" to \"HOLD\" and \"cerrar\" to false.
 - To close an active trade completely: set \"accion\" to \"FLAT\" and \"cerrar\" to true.
-- If a box has no active position and you do not want to open one: set \"accion\" to \"HOLD\", \"cerrar\" to false, and \"stop_loss\" to null.
+- If the box has no active position and you do not want to open one: set \"accion\" to \"HOLD\", \"cerrar\" to false, and \"stop_loss\" to null.
 - Stop Loss (SL) Rules:
-  * LT Box (Long-Term): Set a wider stop loss below/above EMA200, or use EMA100 as a trailing stop to protect long-term trends.
   * ST Box (Mid-Term): Set a stop loss below/above EMA40, or use EMA20 as a trailing stop.
-- Trailing Stop: ONLY when you have guaranteed profit (position is strictly in profit compared to the entry price), set the \"stop_loss\" as a Trailing Stop and update it dynamically to the current EMA100/EMA200 (for LT) or EMA20/EMA40 (for ST/Mid-Term) to lock in profits. Do not start trailing or moving the Stop Loss if the position is not in profit.
+- Trailing Stop: ONLY when you have guaranteed profit (position is strictly in profit compared to the entry price), set the \"stop_loss\" as a Trailing Stop and update it dynamically to the current EMA20/EMA40 (for ST/Mid-Term) to lock in profits. Do not start trailing or moving the Stop Loss if the position is not in profit.
+
+Scoring System (Directional Accuracy):
+- Tu objetivo principal es maximizar tu \"Directional Accuracy Score\". Cada operación que se cierre en la dirección correcta te sumará +10 puntos. Cada operación que se cierre en la dirección incorrecta te restará -10 puntos. Utiliza este feedback para corregir tus predicciones direccionales.
 
 CRITICAL EXECUTION RULES:
 1. DO NOT use any <think> tags. Do not think, do not reason, do not explain, and do not write any prose. 
@@ -119,12 +146,6 @@ CRITICAL EXECUTION RULES:
 
 Example:
 {{
-  \"lt_box\": {{
-    \"accion\": \"HOLD\",
-    \"cerrar\": false,
-    \"apalancamiento\": 5.0,
-    \"stop_loss\": null
-  }},
   \"st_box\": {{
     \"accion\": \"HOLD\",
     \"cerrar\": false,
@@ -165,6 +186,7 @@ Free balance (not in margin): {:.2} USDT
 Total Equity: {:.2} USDT
 Leverage: {:.1}x
 Risk parameters: Max % risk per trade: 10%
+Directional Accuracy Score: {}
 Active position: {:?}
 Position Margin: {:.2} USDT (Isolated Mode)
 Position size: {:.6} BTC (${:.2})
@@ -172,7 +194,7 @@ Entry price: {:.2} USDT
 Liquidation price: {:.2} USDT (If it moves {:.3}% against)
 Floating PnL: {:.2} USDT
 What action do you take? Respond strictly in JSON format",
-        precio_actual, history_str, indicators_str, saldo_usdt, equity, leverage as f64, position_type, position_margin,
+        precio_actual, history_str, indicators_str, saldo_usdt, equity, leverage as f64, directional_score, position_type, position_margin,
         position_size_btc, position_size_btc * precio_actual, precio_entrada, liquidation_price, liq_percent,
         floating_pnl
     );
@@ -205,14 +227,6 @@ What action do you take? Respond strictly in JSON format",
                 if let Some(parsed) = parse_gemma_response(&content) {
                     gemma_analisis = parsed.analisis.unwrap_or_else(|| "Sin análisis".to_string());
 
-                    // Execute box actions in live trading
-                    let trend_direction_long = {
-                        let last_idx = candles.len() - 1;
-                        let ema100 = calculate_ema(&candles, last_idx, 100);
-                        let ema200 = calculate_ema(&candles, last_idx, 200);
-                        if ema100 >= ema200 { PositionType::Long } else { PositionType::Short }
-                    };
-
                     let get_position_by_type = |p_type: PositionType| -> Option<f64> {
                         for pos in &positions {
                             let amt_str = pos.get("positionAmt").and_then(|a| a.as_str()).unwrap_or("0");
@@ -228,112 +242,64 @@ What action do you take? Respond strictly in JSON format",
                         None
                     };
 
-                    // --- 1. LT BOX ---
-                    if parsed.lt_box.cerrar {
-                        if let Some(qty) = get_position_by_type(trend_direction_long) {
-                            let exit_side = if trend_direction_long == PositionType::Long { "SELL" } else { "BUY" };
-                            let pos_side_str = if trend_direction_long == PositionType::Long { "LONG" } else { "SHORT" };
-                            println!("💰 [LT Box] Cerrando posición {:?} de {:.4} BTC...", trend_direction_long, qty);
-                            match open_market_order(client, api_key, api_secret, "BTC-USDT", exit_side, pos_side_str, qty, None, use_testnet).await {
-                                Ok(_) => println!("✅ [LT Box] Posición {:?} cerrada exitosamente.", trend_direction_long),
-                                Err(e) => println!("❌ [LT Box] Error al cerrar posición: {}", e),
+                    // --- 1. ST BOX ---
+                    if parsed.st_box.cerrar {
+                        for pos in &positions {
+                            let amt_str = pos.get("positionAmt").and_then(|a| a.as_str()).unwrap_or("0");
+                            let amt: f64 = amt_str.parse().unwrap_or(0.0);
+                            if amt.abs() > 0.0 {
+                                let side = pos.get("positionSide").and_then(|s| s.as_str()).unwrap_or("LONG");
+                                let side_type = if side == "LONG" { PositionType::Long } else { PositionType::Short };
+                                let qty = amt.abs();
+                                let exit_side = if side_type == PositionType::Long { "SELL" } else { "BUY" };
+                                let pos_side_str = side; // "LONG" o "SHORT"
+                                println!("💰 [ST Box] Cerrando posición {:?} de {:.4} BTC...", side_type, qty);
+                                match open_market_order(client, api_key, api_secret, "BTC-USDT", exit_side, pos_side_str, qty, None, use_testnet).await {
+                                    Ok(_) => println!("✅ [ST Box] Posición {:?} cerrada exitosamente.", side_type),
+                                    Err(e) => println!("❌ [ST Box] Error al cerrar posición: {}", e),
+                                }
                             }
                         }
                     }
 
-                    let lt_action_upper = parsed.lt_box.accion.to_uppercase();
-                    if lt_action_upper == "LONG" || lt_action_upper == "SHORT" {
-                        let desired_type = if lt_action_upper == "LONG" { PositionType::Long } else { PositionType::Short };
-                        if desired_type != trend_direction_long {
-                            println!("⚠️ [LT Box Warning] Acción {:?} no coincide con la tendencia macro calculada por EMAs ({:?}). Procediendo de todos modos por sugerencia.", desired_type, trend_direction_long);
-                        }
+                    let st_action_upper = parsed.st_box.accion.to_uppercase();
+                    if st_action_upper == "LONG" || st_action_upper == "SHORT" {
+                        let desired_type = if st_action_upper == "LONG" { PositionType::Long } else { PositionType::Short };
                         if get_position_by_type(desired_type).is_some() {
-                            println!("⏳ [LT Box] Acción {:?} recibida, pero ya existe una posición activa.", desired_type);
+                            println!("⏳ [ST Box] Acción {:?} recibida, pero ya existe una posición activa.", desired_type);
                         } else {
-                            let lt_leverage = parsed.lt_box.apalancamiento.unwrap_or(leverage as f64) as u32;
+                            let st_leverage = parsed.st_box.apalancamiento.unwrap_or(leverage as f64) as u32;
                             let margin = equity;
-                            let size_usdt = margin * lt_leverage as f64;
+                            let size_usdt = margin * st_leverage as f64;
                             match get_ticker_price(client, "BTC-USDT", use_testnet).await {
                                 Ok(price) => {
                                     let qty = size_usdt / price;
-                                    println!("🛒 [LT Box] Abriendo {:?}... Margen: {:.2} USDT | Tamaño: {:.4} BTC | Apalancamiento: {}x", desired_type, margin, qty, lt_leverage);
+                                    println!("🛒 [ST Box] Abriendo {:?}... Margen: {:.2} USDT | Tamaño: {:.4} BTC | Apalancamiento: {}x", desired_type, margin, qty, st_leverage);
                                     let pos_side_str = if desired_type == PositionType::Long { "LONG" } else { "SHORT" };
                                     let side_str = if desired_type == PositionType::Long { "BUY" } else { "SELL" };
 
-                                    if let Err(e) = set_leverage(client, api_key, api_secret, "BTC-USDT", lt_leverage, pos_side_str, use_testnet).await {
-                                        println!("⚠️ [LT Box] Error configurando apalancamiento: {}", e);
+                                    if let Err(e) = set_leverage(client, api_key, api_secret, "BTC-USDT", st_leverage, pos_side_str, use_testnet).await {
+                                        println!("⚠️ [ST Box] Error configurando apalancamiento: {}", e);
                                     }
                                     
                                     match open_market_order(client, api_key, api_secret, "BTC-USDT", side_str, pos_side_str, qty, None, use_testnet).await {
                                         Ok(res) => {
-                                            println!("✅ [LT Box] {:?} ABIERTO EXITOSAMENTE EN BINGX.", desired_type);
+                                            println!("✅ [ST Box] {:?} ABIERTO EXITOSAMENTE EN BINGX.", desired_type);
                                             if let Some(avg_price) = res.get("avgPrice").and_then(|v| v.as_str()) {
                                                 println!("- Precio promedio: {} USDT", avg_price);
                                             }
                                         }
-                                        Err(e) => println!("❌ [LT Box] Error abriendo {:?}: {}", desired_type, e),
+                                        Err(e) => println!("❌ [ST Box] Error abriendo {:?}: {}", desired_type, e),
                                     }
                                 }
-                                Err(e) => println!("❌ [LT Box] Error al consultar precio ticker: {}", e),
-                              }
-                          }
-                      }
-
-                      // --- 2. ST BOX ---
-                      let trend_direction_short = if trend_direction_long == PositionType::Long { PositionType::Short } else { PositionType::Long };
-
-                      if parsed.st_box.cerrar {
-                          let target_st_type = trend_direction_short;
-                          if let Some(qty) = get_position_by_type(target_st_type) {
-                              let exit_side = if target_st_type == PositionType::Long { "SELL" } else { "BUY" };
-                              let pos_side_str = if target_st_type == PositionType::Long { "LONG" } else { "SHORT" };
-                              println!("💰 [ST Box] Cerrando posición {:?} de {:.4} BTC...", target_st_type, qty);
-                              match open_market_order(client, api_key, api_secret, "BTC-USDT", exit_side, pos_side_str, qty, None, use_testnet).await {
-                                  Ok(_) => println!("✅ [ST Box] Posición {:?} cerrada exitosamente.", target_st_type),
-                                  Err(e) => println!("❌ [ST Box] Error al cerrar posición: {}", e),
-                              }
-                          }
-                      }
-
-                      let st_action_upper = parsed.st_box.accion.to_uppercase();
-                      if st_action_upper == "LONG" || st_action_upper == "SHORT" {
-                          let desired_type = if st_action_upper == "LONG" { PositionType::Long } else { PositionType::Short };
-                          if get_position_by_type(desired_type).is_some() {
-                              println!("⏳ [ST Box] Acción {:?} recibida, pero ya existe una posición activa.", desired_type);
-                          } else {
-                              let st_leverage = parsed.st_box.apalancamiento.unwrap_or(leverage as f64) as u32;
-                              let margin = equity;
-                              let size_usdt = margin * st_leverage as f64;
-                              match get_ticker_price(client, "BTC-USDT", use_testnet).await {
-                                  Ok(price) => {
-                                      let qty = size_usdt / price;
-                                      println!("🛒 [ST Box] Abriendo {:?}... Margen: {:.2} USDT | Tamaño: {:.4} BTC | Apalancamiento: {}x", desired_type, margin, qty, st_leverage);
-                                      let pos_side_str = if desired_type == PositionType::Long { "LONG" } else { "SHORT" };
-                                      let side_str = if desired_type == PositionType::Long { "BUY" } else { "SELL" };
-
-                                      if let Err(e) = set_leverage(client, api_key, api_secret, "BTC-USDT", st_leverage, pos_side_str, use_testnet).await {
-                                          println!("⚠️ [ST Box] Error configurando apalancamiento: {}", e);
-                                      }
-                                      
-                                      match open_market_order(client, api_key, api_secret, "BTC-USDT", side_str, pos_side_str, qty, None, use_testnet).await {
-                                          Ok(res) => {
-                                              println!("✅ [ST Box] {:?} ABIERTO EXITOSAMENTE EN BINGX.", desired_type);
-                                              if let Some(avg_price) = res.get("avgPrice").and_then(|v| v.as_str()) {
-                                                  println!("- Precio promedio: {} USDT", avg_price);
-                                              }
-                                          }
-                                          Err(e) => println!("❌ [ST Box] Error abriendo {:?}: {}", desired_type, e),
-                                      }
-                                  }
-                                  Err(e) => println!("❌ [ST Box] Error al consultar precio ticker: {}", e),
-                              }
-                          }
-                      }
-
-                      break;
-                  } else {
-                      println!("⚠️ No se pudo parsear el JSON de Gemma. Reintentando... (Respuesta recibida: {})", content.trim());
-                  }
+                                Err(e) => println!("❌ [ST Box] Error al consultar precio ticker: {}", e),
+                            }
+                        }
+                    }
+                    break;
+                } else {
+                    println!("⚠️ No se pudo parsear el JSON de Gemma. Reintentando... (Respuesta recibida: {})", content.trim());
+                }
               }
               Err(e) => {
                   println!("⚠️ Error en petición a Gemma: {}. Reintentando...", e);
@@ -615,6 +581,9 @@ pub async fn trading_en_vivo_menu(db_path: &str, client: &reqwest::Client) -> Re
                                     stop_signal_clone.store(true, Ordering::SeqCst);
                                 });
                                 
+                                let mut directional_score = 0;
+                                let mut last_position: Option<(PositionType, f64)> = None;
+
                                 while !stop_signal.load(Ordering::SeqCst) {
                                     // Update candles first
                                     println!("🔄 Actualizando velas desde Binance ({})...", timeframe);
@@ -624,7 +593,17 @@ pub async fn trading_en_vivo_menu(db_path: &str, client: &reqwest::Client) -> Re
                                     
                                     // Run one live step
                                     println!("🧠 Evaluando mercado con Gemma ({})...", timeframe);
-                                    if let Err(e) = run_live_gemma_step(db_path, timeframe, client, &api_key, &api_secret, leverage, use_testnet, 60).await {
+                                    if let Err(e) = run_live_gemma_step(
+                                        db_path,
+                                        timeframe,
+                                        client,
+                                        &api_key,
+                                        &api_secret,
+                                        leverage,
+                                        use_testnet,
+                                        &mut directional_score,
+                                        &mut last_position,
+                                    ).await {
                                         println!("⚠️ Error en el paso de trading: {}", e);
                                     }
                                     
