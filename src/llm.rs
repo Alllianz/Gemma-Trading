@@ -91,13 +91,50 @@ pub async fn call_gemma(
             { "role": "system", "content": system_prompt },
             { "role": "user", "content": user_prompt }
         ],
-        "temperature": 0.1,
+        "temperature": 0.0,
         "seed": 42,
         "max_tokens": 1000,
-        "frequency_penalty": 0.5,
-        "presence_penalty": 0.5,
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0,
         "thinking_budget": 150,
-        "stop": ["<think>", "\n*"]
+        "stop": ["<think>", "\n*"],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "gemma_trading_response",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "analisis": {
+                            "type": "string"
+                        },
+                        "st_box": {
+                            "type": "object",
+                            "properties": {
+                                "accion": {
+                                    "type": "string",
+                                    "enum": ["LONG", "SHORT", "HOLD", "FLAT"]
+                                },
+                                "cerrar": {
+                                    "type": "boolean"
+                                },
+                                "apalancamiento": {
+                                    "type": ["number", "null"]
+                                },
+                                "stop_loss": {
+                                    "type": ["number", "null"]
+                                }
+                            },
+                            "required": ["accion", "cerrar", "apalancamiento", "stop_loss"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["analisis", "st_box"],
+                    "additionalProperties": false
+                }
+            }
+        }
     });
 
     let resp = client.post(&normalized_url)
