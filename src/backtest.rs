@@ -276,23 +276,10 @@ fn execute_box_action(
             .filter(|p| p.box_type == box_type && p.position_type == desired_type)
             .collect();
         
-        let can_open = if active_box_positions.is_empty() {
-            true
-        } else {
-            // Solo se puede abrir otra posición si alguna posición activa de la caja y tipo deseado tiene >= 200% ROI
-            active_box_positions.iter().any(|pos| {
-                let pnl = match pos.position_type {
-                    PositionType::Long => (precio_actual - pos.entry_price) * pos.size_btc,
-                    PositionType::Short => (pos.entry_price - precio_actual) * pos.size_btc,
-                    _ => 0.0,
-                };
-                let roe = (pnl / pos.margin) * 100.0;
-                roe >= 200.0
-            })
-        };
+        let can_open = active_box_positions.len() < 2;
 
         if !can_open {
-            println!("⏳ [{}] Bloqueado abrir {:?}: Existe una posición activa pero ninguna tiene >= +200% ROI.", box_name, desired_type);
+            println!("⏳ [{}] Bloqueado abrir {:?}: Ya existen 2 posiciones activas de este tipo.", box_name, desired_type);
         } else {
             let box_leverage = if dynamic_risk_leverage {
                 box_action.apalancamiento.unwrap_or(leverage)
@@ -375,6 +362,17 @@ fn execute_box_action(
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct BacktestSummary {
+    pub final_equity: f64,
+    pub winrate: f64,
+    pub profit_factor: f64,
+    pub total_trades: usize,
+    pub max_drawdown: f64,
+    pub correlation: f64,
+    pub actions_sequence: String,
+}
+
 pub async fn run_backtest(
     db_path: &str,
     timeframe: &str,
@@ -385,11 +383,10 @@ pub async fn run_backtest(
     verbose: bool,
     dynamic_risk_leverage: bool,
     trading_start_date: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<BacktestSummary, Box<dyn std::error::Error>> {
     let candles = get_candles(db_path, timeframe, limit)?;
     if candles.is_empty() {
-        println!("❌ No hay velas en la base de datos. Descarga velas primero (Opción 1).");
-        return Ok(());
+        return Err("No hay velas en la base de datos. Descarga velas primero (Opción 1).".into());
     }
 
     // Parse trading start timestamp
@@ -416,8 +413,7 @@ pub async fn run_backtest(
     }
 
     if start_trade_idx >= candles.len() {
-        println!("❌ La fecha de inicio de trading especificada ({:?}) está después de la última vela en la DB.", trading_start_date);
-        return Ok(());
+        return Err(format!("La fecha de inicio de trading especificada ({:?}) está después de la última vela en la DB.", trading_start_date).into());
     }
 
     if start_trade_idx > 0 {
@@ -458,6 +454,20 @@ pub async fn run_backtest(
 
     let mut trade_pnls: Vec<f64> = Vec::new();
 
+    // Insertar punto de inicio (momento 0 antes del trading) para reflejar el capital inicial real
+    let start_date_format = if timeframe == "1d" { "%Y-%m-%d" } else { "%Y-%m-%d %H:%M:%S" };
+    let pre_trading_date = chrono::Utc.timestamp_millis_opt(candles[start_trade_idx].open_time)
+        .unwrap()
+        .format(start_date_format)
+        .to_string();
+    equity_curve.push((
+        format!("{} (Inicio)", pre_trading_date),
+        initial_balance,
+        initial_balance,
+        "".to_string(),
+        "".to_string(),
+    ));
+
     // El umbral de liquidación según la fórmula
 
     let system_prompt = format!(
@@ -466,12 +476,12 @@ pub async fn run_backtest(
 INSTRUCTIONS:
 
 Strategy & Capital Allocation (Base Leverage: {}X):
-- Short-Term (ST) Box (Mid-Term operational mode): 100 percent of the total account equity. This proportion represents the max margin limit of the box, not the volume/size.
+- Short-Term (ST) Box (Long-Term operational mode): 100 percent of the total account equity. This proportion represents the max margin limit of the box, not the volume/size.
 - Leverage: Select between 5.0 and 10.0 for any position (include \"apalancamiento\": X in the box JSON).
-- Add position: You are authorized to open your first position freely. You are authorized to open an ADDITIONAL/SECOND position ONLY if the existing position has a profit of >= 200 percent ROI (measured relative to its initial MARGIN). Additional positions will always have the exact same size/margin as the first position.
+- Add position: You are authorized to open up to a MAXIMUM of 2 concurrent positions of the same type at your discretion. Additional positions will always have the exact same size/margin as the first position.
 
 Trend Priority & Guidelines: 
-- Short-Term (ST) Box (Mid-Term operational mode): Actively trade mid-term trends guided by EMA20 and EMA40.
+- Short-Term (ST) Box (Long-Term operational mode): Actively trade long-term trends guided by EMA100 and EMA200.
 
 Position Actions & Stop Loss Rules:
 - To open a new trade: set \"accion\" to \"LONG\" or \"SHORT\" and \"cerrar\" to false.
@@ -479,8 +489,8 @@ Position Actions & Stop Loss Rules:
 - To close an active trade completely: set \"accion\" to \"FLAT\" and \"cerrar\" to true.
 - If the box has no active position and you do not want to open one: set \"accion\" to \"HOLD\", \"cerrar\" to false, and \"stop_loss\" to null.
 - Stop Loss (SL) Rules:
-  * ST Box (Mid-Term): Set a stop loss below/above EMA40, or use EMA20 as a trailing stop.
-- Trailing Stop: ONLY when you have guaranteed profit (position is strictly in profit compared to the entry price), set the \"stop_loss\" as a Trailing Stop and update it dynamically to the current EMA20/EMA40 (for ST/Mid-Term) to lock in profits. Do not start trailing or moving the Stop Loss if the position is not in profit.
+  * ST Box (Long-Term): Set a stop loss below/above EMA200, or use EMA100 as a trailing stop.
+- Trailing Stop: ONLY when you have guaranteed profit (position is strictly in profit compared to the entry price), set the \"stop_loss\" as a Trailing Stop and update it dynamically to the current EMA100/EMA200 (for ST/Long-Term) to lock in profits. Do not start trailing or moving the Stop Loss if the position is not in profit.
 
 Scoring System (Directional Accuracy):
 - Tu objetivo principal es maximizar tu \"Directional Accuracy Score\". Cada operación que se cierre en la dirección correcta te sumará +10 puntos. Cada operación que se cierre en la dirección incorrecta te restará -10 puntos. Utiliza este feedback para corregir tus predicciones direccionales.
@@ -978,5 +988,21 @@ What action do you take? Respond strictly in JSON format",
         true,
     )?;
 
-    Ok(())
+    let mut actions_sequence = String::new();
+    for (_, _, _, actions, _) in &equity_curve {
+        if !actions.is_empty() {
+            actions_sequence.push_str(actions);
+            actions_sequence.push('|');
+        }
+    }
+
+    Ok(BacktestSummary {
+        final_equity,
+        winrate: metrics_global.winrate,
+        profit_factor: metrics_global.profit_factor,
+        total_trades: trade_pnls.len(),
+        max_drawdown: metrics_global.max_drawdown,
+        correlation: metrics_global.correlation,
+        actions_sequence,
+    })
 }

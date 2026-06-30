@@ -120,12 +120,12 @@ pub async fn run_live_gemma_step(
 INSTRUCTIONS:
 
 Strategy & Capital Allocation (Base Leverage: {}X):
-- Short-Term (ST) Box (Mid-Term operational mode): 100 percent of the total account equity. This proportion represents the max margin limit of the box, not the volume/size.
+- Short-Term (ST) Box (Long-Term operational mode): 100 percent of the total account equity. This proportion represents the max margin limit of the box, not the volume/size.
 - Leverage: Select between 5.0 and 10.0 for any position (include \"apalancamiento\": X in the box JSON).
-- Add position: You are authorized to open your first position freely. You are authorized to open an ADDITIONAL/SECOND position ONLY if the existing position has a profit of >= 200 percent ROI (measured relative to its initial MARGIN). Additional positions will always have the exact same size/margin as the first position.
+- Add position: You are authorized to open up to a MAXIMUM of 2 concurrent positions of the same type at your discretion. Additional positions will always have the exact same size/margin as the first position.
 
 Trend Priority & Guidelines: 
-- Short-Term (ST) Box (Mid-Term operational mode): Actively trade mid-term trends guided by EMA20 and EMA40.
+- Short-Term (ST) Box (Long-Term operational mode): Actively trade long-term trends guided by EMA100 and EMA200.
 
 Position Actions & Stop Loss Rules:
 - To open a new trade: set \"accion\" to \"LONG\" or \"SHORT\" and \"cerrar\" to false.
@@ -133,8 +133,8 @@ Position Actions & Stop Loss Rules:
 - To close an active trade completely: set \"accion\" to \"FLAT\" and \"cerrar\" to true.
 - If the box has no active position and you do not want to open one: set \"accion\" to \"HOLD\", \"cerrar\" to false, and \"stop_loss\" to null.
 - Stop Loss (SL) Rules:
-  * ST Box (Mid-Term): Set a stop loss below/above EMA40, or use EMA20 as a trailing stop.
-- Trailing Stop: ONLY when you have guaranteed profit (position is strictly in profit compared to the entry price), set the \"stop_loss\" as a Trailing Stop and update it dynamically to the current EMA20/EMA40 (for ST/Mid-Term) to lock in profits. Do not start trailing or moving the Stop Loss if the position is not in profit.
+  * ST Box (Long-Term): Set a stop loss below/above EMA200, or use EMA100 as a trailing stop.
+- Trailing Stop: ONLY when you have guaranteed profit (position is strictly in profit compared to the entry price), set the \"stop_loss\" as a Trailing Stop and update it dynamically to the current EMA100/EMA200 (for ST/Long-Term) to lock in profits. Do not start trailing or moving the Stop Loss if the position is not in profit.
 
 Scoring System (Directional Accuracy):
 - Tu objetivo principal es maximizar tu \"Directional Accuracy Score\". Cada operación que se cierre en la dirección correcta te sumará +10 puntos. Cada operación que se cierre en la dirección incorrecta te restará -10 puntos. Utiliza este feedback para corregir tus predicciones direccionales.
