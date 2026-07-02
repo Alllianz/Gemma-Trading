@@ -152,105 +152,107 @@
         gradient.addColorStop(0, 'rgba(216, 185, 119, 0.4)');
         gradient.addColorStop(1, 'rgba(216, 185, 119, 0.0)');
 
-        new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: labels,
-                datasets: [
-                    {
-                        label: 'Gemma Trading Bot (USDT)',
-                        data: dataPoints,
-                        borderColor: '#d8b977',
-                        borderWidth: 2,
-                        pointRadius: labels.length > 50 ? 0 : 3,
-                        pointHoverRadius: 6,
-                        fill: true,
-                        backgroundColor: gradient,
-                        tension: 0.2
-                    },
-                    {
-                        label: 'Buy & Hold BTC (USDT)',
-                        data: bhDataPoints,
-                        borderColor: '#525252',
-                        borderWidth: 1.5,
-                        borderDash: [5, 5],
-                        pointRadius: 0,
-                        fill: false,
-                        tension: 0.2
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: {
-                        display: true,
-                        labels: {
-                            color: '#e5e5e5',
-                            font: { family: 'Outfit', size: 12 }
+        document.fonts.ready.then(function() {
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Gemma Trading Bot (USDT)',
+                            data: dataPoints,
+                            borderColor: '#d8b977',
+                            borderWidth: 2,
+                            pointRadius: labels.length > 50 ? 0 : 3,
+                            pointHoverRadius: 6,
+                            fill: true,
+                            backgroundColor: gradient,
+                            tension: 0.2
+                        },
+                        {
+                            label: 'Buy & Hold BTC (USDT)',
+                            data: bhDataPoints,
+                            borderColor: '#525252',
+                            borderWidth: 1.5,
+                            borderDash: [5, 5],
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0.2
                         }
-                    },
-                    tooltip: {
-                        mode: 'index',
-                        intersect: false,
-                        backgroundColor: '#0a0a0a',
-                        titleColor: '#e5e5e5',
-                        bodyColor: '#f5f5f5',
-                        borderColor: '#262626',
-                        borderWidth: 1,
-                        callbacks: {
-                            afterBody: function(context) {
-                                const index = context[0].dataIndex;
-                                const action = actions[index];
-                                const price = prices[index];
-                                if (action && action !== "") {
-                                    return `\\nAcción: ${action}\\nPrecio: ${price} USDT`;
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: true,
+                            labels: {
+                                color: '#e5e5e5',
+                                font: { family: 'Outfit', size: 12 }
+                            }
+                        },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                            backgroundColor: '#0a0a0a',
+                            titleColor: '#e5e5e5',
+                            bodyColor: '#f5f5f5',
+                            borderColor: '#262626',
+                            borderWidth: 1,
+                            callbacks: {
+                                afterBody: function(context) {
+                                    const index = context[0].dataIndex;
+                                    const action = actions[index];
+                                    const price = prices[index];
+                                    if (action && action !== "") {
+                                        return `\\nAcción: ${action}\\nPrecio: ${price} USDT`;
+                                    }
+                                    return '';
                                 }
-                                return '';
                             }
                         }
-                    }
-                },
-                scales: {
-                    x: {
-                        grid: { display: false },
-                        ticks: {
-                            color: '#a3a3a3',
-                            font: { family: 'Outfit' },
-                            callback: function(value, index, ticks) {
-                                const total = ticks.length;
-                                if (total <= 10) {
-                                    return this.getLabelForValue(value);
-                                }
-                                if (index === 0 || index === total - 1) {
-                                    return this.getLabelForValue(value);
-                                }
-                                const step = (total - 1) / 9;
-                                for (let i = 1; i <= 8; i++) {
-                                    if (Math.abs(index - Math.round(i * step)) < 0.5) {
+                    },
+                    scales: {
+                        x: {
+                            grid: { display: false },
+                            ticks: {
+                                color: '#a3a3a3',
+                                font: { family: 'Outfit' },
+                                callback: function(value, index, ticks) {
+                                    const total = ticks.length;
+                                    if (total <= 10) {
                                         return this.getLabelForValue(value);
                                     }
+                                    if (index === 0 || index === total - 1) {
+                                        return this.getLabelForValue(value);
+                                    }
+                                    const step = (total - 1) / 9;
+                                    for (let i = 1; i <= 8; i++) {
+                                        if (Math.abs(index - Math.round(i * step)) < 0.5) {
+                                            return this.getLabelForValue(value);
+                                        }
+                                    }
+                                    return '';
+                                },
+                                autoSkip: false,
+                                maxRotation: 0,
+                                minRotation: 0
+                            }
+                        },
+                        y: {
+                            grid: { color: '#262626' },
+                            ticks: {
+                                color: '#a3a3a3',
+                                font: { family: 'Outfit' },
+                                callback: function(value) {
+                                    return '$' + value.toLocaleString();
                                 }
-                                return '';
-                            },
-                            autoSkip: false,
-                            maxRotation: 0,
-                            minRotation: 0
-                        }
-                    },
-                    y: {
-                        grid: { color: '#262626' },
-                        ticks: {
-                            color: '#a3a3a3',
-                            font: { family: 'Outfit' },
-                            callback: function(value) {
-                                return '$' + value.toLocaleString();
                             }
                         }
                     }
                 }
-            }
+            });
         });
     </script>
 </body>

@@ -41,6 +41,8 @@ struct AdvancedMetrics {
     max_stagnation: usize,
     avg_stagnation: f64,
     correlation: f64,
+    max_drawdown_bah: f64,
+    roi_bah: f64,
 }
 
 fn calculate_advanced_metrics(
@@ -148,6 +150,28 @@ fn calculate_advanced_metrics(
     let bh_equity_series: Vec<f64> = equity_curve.iter().map(|(_, _, bh, _, _)| *bh).collect();
     let correlation = calculate_correlation(&bot_equity_series, &bh_equity_series);
 
+    // Max Drawdown % de Buy & Hold
+    let mut peak_bh = initial_balance;
+    let mut max_dd_pct_bh = 0.0;
+    for (_, _, bh, _, _) in equity_curve {
+        if *bh > peak_bh {
+            peak_bh = *bh;
+        }
+        if peak_bh > 0.0 {
+            let dd_pct = (peak_bh - *bh) / peak_bh;
+            if dd_pct > max_dd_pct_bh {
+                max_dd_pct_bh = dd_pct;
+            }
+        }
+    }
+
+    let current_bh = equity_curve.last().map(|(_, _, bh, _, _)| *bh).unwrap_or(initial_balance);
+    let roi_bah = if initial_balance > 0.0 {
+        ((current_bh - initial_balance) / initial_balance) * 100.0
+    } else {
+        0.0
+    };
+
     AdvancedMetrics {
         winrate,
         profit_factor,
@@ -157,6 +181,8 @@ fn calculate_advanced_metrics(
         max_stagnation,
         avg_stagnation,
         correlation,
+        max_drawdown_bah: max_dd_pct_bh,
+        roi_bah,
     }
 }
 
@@ -931,6 +957,8 @@ What action do you take? Respond strictly in JSON format",
                 metrics_global.recovery_factor,
                 metrics_global.avg_stagnation,
                 metrics_global.max_stagnation,
+                metrics_global.max_drawdown_bah,
+                metrics_global.roi_bah,
                 "dashboard.html",
                 false
             );
@@ -984,6 +1012,8 @@ What action do you take? Respond strictly in JSON format",
         metrics_global.recovery_factor,
         metrics_global.avg_stagnation,
         metrics_global.max_stagnation,
+        metrics_global.max_drawdown_bah,
+        metrics_global.roi_bah,
         "dashboard.html",
         true,
     )?;

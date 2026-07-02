@@ -23,6 +23,8 @@ pub fn generate_dashboard(
     recovery_factor: f64,
     avg_stagnation: f64,
     max_stagnation: usize,
+    max_drawdown_bah: f64,
+    roi_bah: f64,
     filename: &str,
     is_completed: bool,
 ) -> Result<(), std::io::Error> {
@@ -33,6 +35,9 @@ pub fn generate_dashboard(
     } else {
         0.0
     };
+
+    let start_date = curve.first().map(|(time, _, _, _, _)| time.as_str()).unwrap_or("N/A");
+    let end_date = curve.last().map(|(time, _, _, _, _)| time.as_str()).unwrap_or("N/A");
 
     let labels: Vec<String> = curve.iter().map(|(time, _, _, _, _)| time.clone()).collect();
     let data: Vec<f64> = curve.iter().map(|(_, eq, _, _, _)| *eq).collect();
@@ -80,7 +85,7 @@ pub fn generate_dashboard(
                 <h1 class="text-2xl font-bold tracking-tight bg-gradient-to-r from-[#d8b977] via-amber-400 to-[#d8b977] bg-clip-text text-transparent">
                     Gemma Trading Bot - Allianz
                 </h1>
-                <p class="text-neutral-400 text-xs mt-0.5">Reporte de Backtesting - BTCUSDT Futuros Apalancado</p>
+                <p class="text-neutral-400 text-xs mt-0.5">Reporte de Backtesting - BTCUSDT Futuros Apalancado ({start_date} a {end_date})</p>
             </div>
             <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl px-3 py-1.5 text-xs flex items-center gap-2 shadow-lg {status_color}">
                 <span class="w-2 h-2 rounded-full {pulse_color} animate-pulse"></span>
@@ -88,97 +93,109 @@ pub fn generate_dashboard(
             </div>
         </div>
 
-        <!-- Reconditioned 2x7 Metrics Grid Grouped by Affinity (Compact) -->
-        <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 flex-shrink-0">
-            <!-- fila 1: Métricas de Rendimiento y Retorno -->
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+        <!-- Reconditioned 2x8 Metrics Grid Grouped by Affinity (Compact) -->
+        <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 flex-shrink-0">
+            <!-- fila 1: Métricas de Rendimiento y Retorno (Superior) -->
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
                 <span class="text-neutral-400 text-xs font-medium">Balance Inicial</span>
                 <span class="text-lg font-bold text-neutral-200 mt-1">${initial_balance:.2}</span>
                 <span class="text-[10px] text-neutral-500 mt-0.5">USDT</span>
             </div>
 
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
-                <span class="text-neutral-400 text-xs font-medium">Balance Final</span>
-                <span class="text-lg font-bold text-neutral-100 mt-1">${final_balance:.2}</span>
-                <span class="text-[10px] text-neutral-500 mt-0.5">USDT</span>
-            </div>
-
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
                 <span class="text-neutral-400 text-xs font-medium">Retorno (ROI)</span>
                 <span class="text-lg font-bold mt-1 {roi_color}">{roi:+.2}%</span>
                 <span class="text-[10px] text-neutral-500 mt-0.5">Desde el inicio</span>
             </div>
 
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
-                <span class="text-neutral-400 text-xs font-medium">Sortino Ratio</span>
-                <span class="text-lg font-bold text-[#d8b977] mt-1">{sortino_ratio:.2}</span>
-                <span class="text-[10px] text-neutral-500 mt-0.5">Anualizado</span>
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+                <span class="text-neutral-400 text-xs font-medium">Retorno (BaH)</span>
+                <span class="text-lg font-bold mt-1 {roi_bah_color}">{roi_bah:+.2}%</span>
+                <span class="text-[10px] text-neutral-500 mt-0.5">Buy & Hold</span>
             </div>
 
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
-                <span class="text-neutral-400 text-xs font-medium">Recovery Factor</span>
-                <span class="text-lg font-bold text-amber-500 mt-1">{recovery_factor:.2}</span>
-                <span class="text-[10px] text-neutral-500 mt-0.5">Net Profit / Max DD</span>
-            </div>
-
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
-                <span class="text-neutral-400 text-xs font-medium">Corr. Buy & Hold</span>
-                <span class="text-lg font-bold text-[#d8b977] mt-1">{correlation:+.4}</span>
-                <span class="text-[10px] text-neutral-500 mt-0.5">Correlación lineal</span>
-            </div>
-
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
-                <span class="text-neutral-400 text-xs font-medium">Máximo Drawdown</span>
-                <span class="text-lg font-bold text-rose-500 mt-1">-{max_drawdown:.2}%</span>
-                <span class="text-[10px] text-neutral-500 mt-0.5">Pico a valle</span>
-            </div>
-
-            <!-- fila 2: Métricas de Operativa y Análisis de Trades -->
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
-                <span class="text-neutral-400 text-xs font-medium">Operaciones Totales</span>
-                <span class="text-lg font-bold text-[#d8b977] mt-1">{total_trades}</span>
-                <span class="text-[10px] text-neutral-500 mt-0.5">Ejecutadas</span>
-            </div>
-
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
-                <span class="text-neutral-400 text-xs font-medium">Compras (Longs)</span>
-                <span class="text-lg font-bold text-emerald-400 mt-1">{num_compras}</span>
-                <span class="text-[10px] text-neutral-500 mt-0.5">Velas de compra</span>
-            </div>
-
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
-                <span class="text-neutral-400 text-xs font-medium">Ventas (Shorts)</span>
-                <span class="text-lg font-bold text-amber-400 mt-1">{num_ventas}</span>
-                <span class="text-[10px] text-neutral-500 mt-0.5">Velas de venta</span>
-            </div>
-
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
                 <span class="text-neutral-400 text-xs font-medium">Winrate</span>
                 <span class="text-lg font-bold text-[#d8b977] mt-1">{winrate:.2}%</span>
                 <span class="text-[10px] text-neutral-500 mt-0.5">Porcentaje de acierto</span>
             </div>
 
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
                 <span class="text-neutral-400 text-xs font-medium">Profit Factor</span>
                 <span class="text-lg font-bold text-emerald-400 mt-1">{profit_factor:.2}</span>
                 <span class="text-[10px] text-neutral-500 mt-0.5">Beneficio / Pérdida</span>
             </div>
 
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+                <span class="text-neutral-400 text-xs font-medium">Corr. Buy & Hold</span>
+                <span class="text-lg font-bold text-[#d8b977] mt-1">{correlation:+.4}</span>
+                <span class="text-[10px] text-neutral-500 mt-0.5">Correlación lineal</span>
+            </div>
+
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+                <span class="text-neutral-400 text-xs font-medium">Operaciones Totales</span>
+                <span class="text-lg font-bold text-[#d8b977] mt-1">{total_trades}</span>
+                <span class="text-[10px] text-neutral-500 mt-0.5">Ejecutadas</span>
+            </div>
+
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+                <span class="text-neutral-400 text-xs font-medium">Compras (Longs)</span>
+                <span class="text-lg font-bold text-emerald-400 mt-1">{num_compras}</span>
+                <span class="text-[10px] text-neutral-500 mt-0.5">Velas de compra</span>
+            </div>
+
+            <!-- fila 2 -->
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+                <span class="text-neutral-400 text-xs font-medium">Balance Final</span>
+                <span class="text-lg font-bold text-neutral-100 mt-1">${final_balance:.2}</span>
+                <span class="text-[10px] text-neutral-500 mt-0.5">USDT</span>
+            </div>
+
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+                <span class="text-neutral-400 text-xs font-medium">Máximo Drawdown</span>
+                <span class="text-lg font-bold text-rose-500 mt-1">-{max_drawdown:.2}%</span>
+                <span class="text-[10px] text-neutral-500 mt-0.5">Pico a valle</span>
+            </div>
+
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+                <span class="text-neutral-400 text-xs font-medium">Maximo Drawdown (BaH)</span>
+                <span class="text-lg font-bold text-rose-400 mt-1">-{max_drawdown_bah:.2}%</span>
+                <span class="text-[10px] text-neutral-500 mt-0.5">Pico a valle</span>
+            </div>
+
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+                <span class="text-neutral-400 text-xs font-medium">Sortino Ratio</span>
+                <span class="text-lg font-bold text-[#d8b977] mt-1">{sortino_ratio:.2}</span>
+                <span class="text-[10px] text-neutral-500 mt-0.5">Anualizado</span>
+            </div>
+
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+                <span class="text-neutral-400 text-xs font-medium">Recovery Factor</span>
+                <span class="text-lg font-bold text-amber-500 mt-1">{recovery_factor:.2}</span>
+                <span class="text-[10px] text-neutral-500 mt-0.5">Net Profit / Max DD</span>
+            </div>
+
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+                <span class="text-neutral-400 text-xs font-medium">Estancamiento</span>
+                <span class="text-base font-bold text-neutral-200 mt-1">Max: {max_stagnation} v.</span>
+                <span class="text-[10px] text-neutral-400 mt-0.5">Promedio: {avg_stagnation:.1} v.</span>
+            </div>
+
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
                 <span class="text-neutral-400 text-xs font-medium">Liquidaciones</span>
                 <span class="text-lg font-bold mt-1 {liq_color}">{num_liquidaciones}</span>
                 <span class="text-[10px] text-neutral-500 mt-0.5">Margen perdido</span>
             </div>
 
-            <div class="bg-[#0e0e0e] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
-                <span class="text-neutral-400 text-xs font-medium">Estancamiento</span>
-                <span class="text-base font-bold text-neutral-200 mt-1">Max: {max_stagnation} v.</span>
-                <span class="text-[10px] text-neutral-400 mt-0.5">Promedio: {avg_stagnation:.1} v.</span>
+            <div class="bg-[#151515] border border-neutral-800 rounded-xl p-3 shadow-xl flex flex-col justify-between hover:border-neutral-700 transition duration-300">
+                <span class="text-neutral-400 text-xs font-medium">Ventas (Shorts)</span>
+                <span class="text-lg font-bold text-amber-400 mt-1">{num_ventas}</span>
+                <span class="text-[10px] text-neutral-500 mt-0.5">Velas de venta</span>
             </div>
         </div>
 
         <!-- Chart (Flex-grow to occupy all remaining screen height) -->
-        <div class="bg-[#0e0e0e] border border-neutral-800 rounded-2xl p-4 shadow-2xl flex-grow flex flex-col min-h-0">
+        <div class="bg-[#151515] border border-neutral-800 rounded-2xl p-4 shadow-2xl flex-grow flex flex-col min-h-0">
             <h2 class="text-sm font-semibold text-neutral-200 mb-2 flex items-center gap-2 flex-shrink-0">
                 <svg class="w-4 h-4 text-[#d8b977]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
                 Comparativa de Equidad (Gemma vs Buy & Hold)
@@ -201,105 +218,109 @@ pub fn generate_dashboard(
         gradient.addColorStop(0, 'rgba(216, 185, 119, 0.4)');
         gradient.addColorStop(1, 'rgba(216, 185, 119, 0.0)');
 
-        new Chart(ctx, {{
-            type: 'line',
-            data: {{
-                labels: labels,
-                datasets: [
-                    {{
-                        label: 'Gemma Trading Bot (USDT)',
-                        data: dataPoints,
-                        borderColor: '#d8b977',
-                        borderWidth: 2,
-                        pointRadius: labels.length > 50 ? 0 : 3,
-                        pointHoverRadius: 6,
-                        fill: true,
-                        backgroundColor: gradient,
-                        tension: 0.2
-                    }},
-                    {{
-                        label: 'Buy & Hold BTC (USDT)',
-                        data: bhDataPoints,
-                        borderColor: '#525252',
-                        borderWidth: 1.5,
-                        borderDash: [5, 5],
-                        pointRadius: 0,
-                        fill: false,
-                        tension: 0.2
-                    }}
-                ]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {{
-                    legend: {{
-                        display: true,
-                        labels: {{
-                            color: '#e5e5e5',
-                            font: {{ family: 'Outfit', size: 12 }}
+        document.fonts.ready.then(function() {{
+            new Chart(ctx, {{
+                type: 'line',
+                data: {{
+                    labels: labels,
+                    datasets: [
+                        {{
+                            label: 'Gemma Trading Bot (USDT)',
+                            data: dataPoints,
+                            borderColor: '#d8b977',
+                            borderWidth: 2,
+                            pointRadius: labels.length > 50 ? 0 : 3,
+                            pointHoverRadius: 6,
+                            fill: true,
+                            backgroundColor: gradient,
+                            tension: 0.2
+                        }},
+                        {{
+                            label: 'Buy & Hold BTC (USDT)',
+                            data: bhDataPoints,
+                            borderColor: '#525252',
+                            borderWidth: 1.5,
+                            borderDash: [5, 5],
+                            pointRadius: 0,
+                            fill: false,
+                            tension: 0.2
                         }}
-                    }},
-                    tooltip: {{
-                        mode: 'index',
-                        intersect: false,
-                        backgroundColor: '#0a0a0a',
-                        titleColor: '#e5e5e5',
-                        bodyColor: '#f5f5f5',
-                        borderColor: '#262626',
-                        borderWidth: 1,
-                        callbacks: {{
-                            afterBody: function(context) {{
-                                const index = context[0].dataIndex;
-                                const action = actions[index];
-                                const price = prices[index];
-                                if (action && action !== "") {{
-                                    return `\\nAcción: ${{action}}\\nPrecio: ${{price}} USDT`;
+                    ]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: {{
+                        legend: {{
+                            display: true,
+                            labels: {{
+                                color: '#e5e5e5',
+                                font: {{ family: 'Outfit', size: 12 }}
+                            }}
+                        }},
+                        tooltip: {{
+                            mode: 'index',
+                            intersect: false,
+                            backgroundColor: '#0a0a0a',
+                            titleColor: '#e5e5e5',
+                            bodyColor: '#f5f5f5',
+                            borderColor: '#262626',
+                            borderWidth: 1,
+                            callbacks: {{
+                                afterBody: function(context) {{
+                                    const index = context[0].dataIndex;
+                                    const action = actions[index];
+                                    const price = prices[index];
+                                    if (action && action !== "") {{
+                                        return `\\nAcción: ${{action}}\\nPrecio: ${{price}} USDT`;
+                                    }}
+                                    return '';
                                 }}
-                                return '';
                             }}
                         }}
-                    }}
-                }},
-                scales: {{
-                    x: {{
-                        grid: {{ display: false }},
-                        ticks: {{
-                            color: '#a3a3a3',
-                            font: {{ family: 'Outfit' }},
-                            callback: function(value, index, ticks) {{
-                                const total = ticks.length;
-                                if (total <= 10) {{
-                                    return this.getLabelForValue(value);
-                                }}
-                                if (index === 0 || index === total - 1) {{
-                                    return this.getLabelForValue(value);
-                                }}
-                                const step = (total - 1) / 9;
-                                for (let i = 1; i <= 8; i++) {{
-                                    if (Math.abs(index - Math.round(i * step)) < 0.5) {{
+                    }},
+                    scales: {{
+                        x: {{
+                            grid: {{ display: false }},
+                            ticks: {{
+                                color: '#a3a3a3',
+                                font: {{ family: 'Outfit' }},
+                                callback: function(value, index, ticks) {{
+                                    const total = ticks.length;
+                                    if (total <= 10) {{
                                         return this.getLabelForValue(value);
                                     }}
+                                    if (index === 0 || index === total - 1) {{
+                                        return this.getLabelForValue(value);
+                                    }}
+                                    const step = (total - 1) / 9;
+                                    for (let i = 1; i <= 8; i++) {{
+                                        if (Math.abs(index - Math.round(i * step)) < 0.5) {{
+                                            return this.getLabelForValue(value);
+                                        }}
+                                    }}
+                                    return '';
+                                }},
+                                autoSkip: false,
+                                maxRotation: 0,
+                                minRotation: 0
+                            }}
+                        }},
+                        y: {{
+                            type: 'logarithmic',
+                            grid: {{ color: '#262626' }},
+                            ticks: {{
+                                color: '#a3a3a3',
+                                font: {{ family: 'Outfit' }},
+                                callback: function(value) {{
+                                    return '$' + Number(value).toLocaleString();
                                 }}
-                                return '';
-                            }},
-                            autoSkip: false,
-                            maxRotation: 0,
-                            minRotation: 0
-                        }}
-                    }},
-                    y: {{
-                        grid: {{ color: '#262626' }},
-                        ticks: {{
-                            color: '#a3a3a3',
-                            font: {{ family: 'Outfit' }},
-                            callback: function(value) {{
-                                return '$' + value.toLocaleString();
                             }}
                         }}
                     }}
                 }}
-            }}
+            }});
         }});
     </script>
 </body>
@@ -312,7 +333,10 @@ pub fn generate_dashboard(
         final_balance = final_balance,
         roi = roi,
         roi_color = if roi >= 0.0 { "text-emerald-400" } else { "text-rose-500" },
+        roi_bah = roi_bah,
+        roi_bah_color = if roi_bah >= 0.0 { "text-emerald-400" } else { "text-rose-500" },
         max_drawdown = max_drawdown * 100.0,
+        max_drawdown_bah = max_drawdown_bah * 100.0,
         total_trades = num_compras + num_ventas,
         num_compras = num_compras,
         num_ventas = num_ventas,
@@ -329,7 +353,9 @@ pub fn generate_dashboard(
         data_json = data_json,
         bh_data_json = bh_data_json,
         actions_json = actions_json,
-        prices_json = prices_json
+        prices_json = prices_json,
+        start_date = start_date,
+        end_date = end_date
     );
 
     let mut file = File::create(filename)?;
